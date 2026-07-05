@@ -232,6 +232,8 @@ struct Log {
     float sales;
     float equip_attack;
     float equip_defense;
+	float num_agents;
+	float width;
     float r;
     float c;
 };
