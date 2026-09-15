@@ -3,6 +3,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <cstdlib>
+#include <cstring>
 #include "pufferlib.cu"
 
 #define _PUFFER_STRINGIFY(x) #x
@@ -392,8 +394,14 @@ void gpu_vec_step_py(VecEnv& ve, long long actions_ptr) {
 }
 
 void cpu_vec_step_py(VecEnv& ve, long long actions_ptr) {
-    memcpy(ve.vec->actions, (void*)actions_ptr,
-        (size_t)ve.total_agents * ve.num_atns * sizeof(float));
+    const char* direct_llm_actions = std::getenv("NMMO3_USE_LLM_ACTION");
+    bool preserve_native_actions = direct_llm_actions != nullptr &&
+        (std::strcmp(direct_llm_actions, "1") == 0 ||
+         std::strcmp(direct_llm_actions, "true") == 0);
+    if (!preserve_native_actions) {
+        memcpy(ve.vec->actions, (void*)actions_ptr,
+            (size_t)ve.total_agents * ve.num_atns * sizeof(float));
+    }
     {
         py::gil_scoped_release no_gil;
         cpu_vec_step(ve.vec);
@@ -643,6 +651,7 @@ PYBIND11_MODULE(_C, m) {
         .def_property_readonly("obs_ptr",       [](VecEnv& ve) { return (long long)ve.vec->observations; })
         .def_property_readonly("rewards_ptr",   [](VecEnv& ve) { return (long long)ve.vec->rewards; })
         .def_property_readonly("terminals_ptr", [](VecEnv& ve) { return (long long)ve.vec->terminals; })
+        .def_property_readonly("actions_ptr",   [](VecEnv& ve) { return (long long)ve.vec->actions; })
         .def("reset", &vec_reset)
         .def("gpu_step", &gpu_vec_step_py)
         .def("cpu_step", &cpu_vec_step_py)

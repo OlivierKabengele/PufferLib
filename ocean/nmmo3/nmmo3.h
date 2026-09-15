@@ -1245,6 +1245,7 @@ inline bool dest_check(MMO* env, int r, int c) {
 int nmmo3_strategy_step(MMO* env, int pid);
 #define nmmo3_qwen3_strategy nmmo3_strategy_step
 int query_llm_action(MMO* env, int pid);
+int query_llm_actions(MMO* env, int first_pid, int count);
 
 void move(MMO* env, int pid, int direction, bool run) {
     Entity* entity = get_entity(env, pid);
@@ -1687,6 +1688,13 @@ void enemy_ai(MMO* env, int pid) {
 
 void c_reset(MMO* env) {
     env->tick = 0;
+    const char* use_llm_action = getenv("NMMO3_USE_LLM_ACTION");
+    if (use_llm_action != NULL &&
+        (strcmp(use_llm_action, "1") == 0 || strcmp(use_llm_action, "true") == 0)) {
+        for (int pid = 0; pid < env->num_agents; pid++) {
+            env->actions[pid] = ATN_NOOP;
+        }
+    }
 
     env->market_sells = 0;
     env->market_buys = 0;
@@ -1919,9 +1927,16 @@ void c_step(MMO* env) {
     bool strategy_enabled = (use_strategy != NULL && (strcmp(use_strategy, "1") == 0 || strcmp(use_strategy, "true") == 0)) ||
                            (use_qwen3 != NULL && (strcmp(use_qwen3, "1") == 0 || strcmp(use_qwen3, "true") == 0));
     if (llm_action_enabled && env->num_agents > 0 && tick % llm_action_interval == 0) {
-        int pid = env->llm_action_pid % env->num_agents;
-        env->actions[pid] = query_llm_action(env, pid);
-        env->llm_action_pid = (pid + 1) % env->num_agents;
+        int batch_size = 8;
+        const char* batch_size_env = getenv("NMMO3_LLM_ACTION_BATCH_SIZE");
+        if (batch_size_env != NULL && atoi(batch_size_env) > 0) {
+            batch_size = atoi(batch_size_env);
+        }
+        for (int first_pid = 0; first_pid < env->num_agents; first_pid += batch_size) {
+            int count = env->num_agents - first_pid;
+            if (count > batch_size) count = batch_size;
+            (void)query_llm_actions(env, first_pid, count);
+        }
     } else if (strategy_enabled && env->num_agents > 0) {
         if (env->strategy_pid > 0 || tick % strategy_interval == 0) {
             (void)nmmo3_strategy_step(env, 0);

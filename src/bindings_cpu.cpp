@@ -5,6 +5,7 @@
 
 #define _PUFFER_STRINGIFY(x) #x
 #define PUFFER_STRINGIFY(x) _PUFFER_STRINGIFY(x)
+#include <cstdlib>
 #include <cstring>
 
 // vecenv.h header section gives us StaticVec, Dict, cudaStream_t typedef
@@ -132,8 +133,14 @@ static void vec_reset(VecEnv& ve) {
 }
 
 static void cpu_vec_step_py(VecEnv& ve, long long actions_ptr) {
-    memcpy(ve.vec->actions, (void*)actions_ptr,
-        (size_t)ve.total_agents * ve.num_atns * sizeof(float));
+    const char* direct_llm_actions = std::getenv("NMMO3_USE_LLM_ACTION");
+    bool preserve_native_actions = direct_llm_actions != nullptr &&
+        (std::strcmp(direct_llm_actions, "1") == 0 ||
+         std::strcmp(direct_llm_actions, "true") == 0);
+    if (!preserve_native_actions) {
+        memcpy(ve.vec->actions, (void*)actions_ptr,
+            (size_t)ve.total_agents * ve.num_atns * sizeof(float));
+    }
     {
         py::gil_scoped_release no_gil;
         cpu_vec_step(ve.vec);
@@ -179,6 +186,7 @@ PYBIND11_MODULE(_C, m) {
         .def_property_readonly("obs_ptr", [](VecEnv& ve) { return (long long)ve.vec->observations; })
         .def_property_readonly("rewards_ptr", [](VecEnv& ve) { return (long long)ve.vec->rewards; })
         .def_property_readonly("terminals_ptr", [](VecEnv& ve) { return (long long)ve.vec->terminals; })
+        .def_property_readonly("actions_ptr", [](VecEnv& ve) { return (long long)ve.vec->actions; })
         .def("reset", &vec_reset)
         .def("cpu_step", &cpu_vec_step_py)
         .def("render", [](VecEnv& ve, int env_id) { static_vec_render(ve.vec, env_id); })

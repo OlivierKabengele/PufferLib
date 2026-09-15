@@ -51,3 +51,25 @@ INPUT CONTEXT:
 
 def build_action_prompt(strategy_context):
     return ACTION_PROMPT.replace("{strategy_context}", strategy_context)
+
+
+def build_batch_action_prompt(agent_contexts):
+  contexts = "\n\n".join(
+    f"AGENT {agent_id} CONTEXT:\n{context}"
+    for agent_id, context in agent_contexts
+  )
+  return ACTION_PROMPT.replace(
+    "Analyze the structured INPUT CONTEXT and choose exactly one primitive action for the controlled agent.",
+    "Analyze every agent context below and choose exactly one primitive action for each controlled agent.",
+  ).replace(
+    'Return ONLY valid JSON with exactly these two keys and no explanation:\n{\n  "action_code": <integer from the available actions>,\n  "confidence": <float from 0.0 to 1.0>\n}',
+    'Return ONLY valid JSON with exactly this structure and no explanation:\n'
+    '{\n  "actions": [\n    {"agent_id": <integer>, "action_code": <integer from the available actions>, "confidence": <float from 0.0 to 1.0>}\n  ]\n}',
+  ).replace("INPUT CONTEXT:\n{strategy_context}", contexts)
+
+
+def parse_action_code(value):
+  code = int(value)
+  if code < 0 or code > 25 or code in (6, 7):
+    raise ValueError("invalid action_code")
+  return code

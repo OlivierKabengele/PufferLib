@@ -63,14 +63,16 @@ int query_llm_action(MMO* env, int pid) {
     int status;
     int action = ATN_NOOP;
 
-    if (build_strategy_context(env, pid, &context) < 0 ||
+    if (build_observation_context(env, pid, &context) < 0 ||
         pipe(input_pipe) < 0 || pipe(output_pipe) < 0) {
         return ATN_NOOP;
     }
     child = fork();
     if (child == 0) {
         const char* script = getenv("NMMO3_ACTION_SCRIPT");
-        int error_fd = open("/dev/null", O_WRONLY);
+        const char* debug = getenv("NMMO3_ACTION_DEBUG");
+        int debug_enabled = debug != NULL && (strcmp(debug, "1") == 0 || strcmp(debug, "true") == 0);
+        int error_fd = debug_enabled ? -1 : open("/dev/null", O_WRONLY);
         if (script == NULL || script[0] == '\0') {
             script = "ocean/nmmo3/ollama_action.py";
         }
@@ -111,6 +113,97 @@ int query_llm_action(MMO* env, int pid) {
         return ATN_NOOP;
     }
     return action;
+}
+
+int query_llm_actions(MMO* env, int first_pid, int count) {
+    int input_pipe[2], output_pipe[2];
+    pid_t child;
+    size_t input_capacity = (size_t)count * STRATEGY_CONTEXT_MAX + 64;
+    char* input = malloc(input_capacity);
+    char response[8192];
+    size_t input_size = 0;
+    ssize_t bytes_read;
+    int status;
+    int found = 0;
+
+    if (input == NULL || count <= 0 || first_pid < 0 || first_pid + count > env->num_agents) {
+        free(input);
+        return 0;
+    }
+    input_size += (size_t)snprintf(input + input_size, input_capacity - input_size,
+        "NMMO3_ACTION_BATCH\n");
+    for (int pid = first_pid; pid < first_pid + count; pid++) {
+        StrategyContext context;
+        if (build_observation_context(env, pid, &context) < 0) {
+            free(input);
+            return 0;
+        }
+        input_size += (size_t)snprintf(input + input_size, input_capacity - input_size,
+            "AGENT %d\n%s\nEND_AGENT\n", pid, context.text);
+    }
+    if (pipe(input_pipe) < 0 || pipe(output_pipe) < 0) {
+        free(input);
+        return 0;
+    }
+    child = fork();
+    if (child == 0) {
+        const char* script = getenv("NMMO3_ACTION_SCRIPT");
+        const char* debug = getenv("NMMO3_ACTION_DEBUG");
+        int debug_enabled = debug != NULL && (strcmp(debug, "1") == 0 || strcmp(debug, "true") == 0);
+        int error_fd = debug_enabled ? -1 : open("/dev/null", O_WRONLY);
+        if (script == NULL || script[0] == '\0') script = "ocean/nmmo3/ollama_action.py";
+        dup2(input_pipe[0], STDIN_FILENO);
+        dup2(output_pipe[1], STDOUT_FILENO);
+        close(input_pipe[0]); close(input_pipe[1]);
+        close(output_pipe[0]); close(output_pipe[1]);
+        if (error_fd >= 0) {
+            dup2(error_fd, STDERR_FILENO);
+            close(error_fd);
+        }
+        execlp("python3", "python3", script, (char*)NULL);
+        _exit(127);
+    }
+    if (child < 0) {
+        close(input_pipe[0]); close(input_pipe[1]);
+        close(output_pipe[0]); close(output_pipe[1]);
+        free(input);
+        return 0;
+    }
+    close(input_pipe[0]);
+    close(output_pipe[1]);
+    (void)write(input_pipe[1], input, input_size);
+    close(input_pipe[1]);
+    free(input);
+    bytes_read = read(output_pipe[0], response, sizeof(response) - 1);
+    close(output_pipe[0]);
+    waitpid(child, &status, 0);
+    if (bytes_read <= 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return 0;
+    response[bytes_read] = '\0';
+    // Scan every "agent_id" occurrence rather than string-matching an exact
+    // "agent_id": N form, since small models vary spacing/quoting/key order.
+    {
+        char* cursor = response;
+        char* agent_marker;
+        while ((agent_marker = strstr(cursor, "\"agent_id\"")) != NULL) {
+            int agent_id, action = ATN_NOOP;
+            char* action_marker;
+            cursor = agent_marker + 1;
+            if (sscanf(agent_marker, "\"agent_id\"%*[^0-9]%d", &agent_id) != 1 ||
+                agent_id < first_pid || agent_id >= first_pid + count) {
+                continue;
+            }
+            action_marker = strstr(agent_marker, "\"action_code\"");
+            if (action_marker == NULL ||
+                sscanf(action_marker, "\"action_code\"%*[^0-9]%d", &action) != 1) {
+                continue;
+            }
+            if (action >= ATN_DOWN && action <= ATN_LEFT_SHIFT && action != 6 && action != 7) {
+                env->actions[agent_id] = action;
+                found++;
+            }
+        }
+    }
+    return found == count;
 }
 
 int build_strategy_context(MMO* env, int pid, StrategyContext* context) {
@@ -246,6 +339,98 @@ int build_strategy_context(MMO* env, int pid, StrategyContext* context) {
         offset = append_text(context->text, offset, "%s\n", env->strategy_history[history_idx]);
     }
     offset = append_text(context->text, offset, "\nMARKET\nbuys=%d\nsells=%d\n", context->market_buys, context->market_sells);
+    if (offset < 0) return -1;
+    context->text[STRATEGY_CONTEXT_MAX - 1] = '\0';
+    return offset >= STRATEGY_CONTEXT_MAX ? STRATEGY_CONTEXT_MAX - 1 : offset;
+}
+
+// Decodes the exact byte layout compute_all_obs() writes for this agent, i.e. the
+// same map/player/reward window the CNN, player, and reward encoders consume,
+// so the LLM reads a language rendering of that observation rather than raw state.
+int build_observation_context(MMO* env, int pid, StrategyContext* context) {
+    int offset = 0;
+    int rows, cols;
+    unsigned char* obs;
+    int player_base, reward_base;
+    int items_listed = 0, entities_listed = 0;
+
+    if (env == NULL || context == NULL || pid < 0 || pid >= env->num_agents ||
+        env->observations == NULL) return -1;
+    memset(context, 0, sizeof(*context));
+    context->pid = pid;
+    rows = 2 * env->y_window + 1;
+    cols = 2 * env->x_window + 1;
+    obs = env->observations + (size_t)pid * (rows * cols * 10 + 47 + 10 + NMMO3_STRATEGY_DIM);
+
+    offset = append_text(context->text, offset,
+        "LOCAL_OBSERVATION_CONTEXT\ncontroller_agent=%d\ntick=%d\n\n"
+        "MAP_WINDOW rows=%d cols=%d (each cell: biome,season)\n",
+        pid, env->tick, rows, cols);
+    for (int r = 0; r < rows; r++) {
+        offset = append_text(context->text, offset, "row %+d:", r - env->y_window);
+        for (int c = 0; c < cols; c++) {
+            int cell = (r * cols + c) * 10;
+            offset = append_text(context->text, offset, " %d%d", obs[cell + 1], obs[cell]);
+        }
+        offset = append_text(context->text, offset, "\n");
+    }
+
+    offset = append_text(context->text, offset, "\nMAP_ITEMS (rel_row,rel_col,type,tier)\n");
+    for (int r = 0; r < rows && items_listed < STRATEGY_CONTEXT_MAX_RESOURCES; r++) {
+        for (int c = 0; c < cols && items_listed < STRATEGY_CONTEXT_MAX_RESOURCES; c++) {
+            int cell = (r * cols + c) * 10;
+            if (obs[cell + 2] == 0) continue;
+            offset = append_text(context->text, offset, "item rel=(%d,%d) type=%d tier=%d\n",
+                r - env->y_window, c - env->x_window, obs[cell + 2], obs[cell + 3]);
+            items_listed++;
+        }
+    }
+
+    offset = append_text(context->text, offset,
+        "\nMAP_ENTITIES (rel_row,rel_col,type,element,rel_combat_bucket,hp_bucket,anim,dir)\n");
+    for (int r = 0; r < rows && entities_listed < STRATEGY_CONTEXT_MAX_ENTITIES; r++) {
+        for (int c = 0; c < cols && entities_listed < STRATEGY_CONTEXT_MAX_ENTITIES; c++) {
+            int cell = (r * cols + c) * 10;
+            if (obs[cell + 4] == 0) continue;
+            offset = append_text(context->text, offset,
+                "entity rel=(%d,%d) type=%d element=%d rel_combat_bucket=%d hp_bucket=%d anim=%d dir=%d\n",
+                r - env->y_window, c - env->x_window, obs[cell + 4], obs[cell + 5],
+                obs[cell + 6], obs[cell + 7], obs[cell + 8], obs[cell + 9]);
+            entities_listed++;
+        }
+    }
+
+    player_base = rows * cols * 10;
+    offset = append_text(context->text, offset,
+        "\nPLAYER_OBSERVATION\ntype=%d combat_level=%d element=%d dir=%d anim=%d hp=%d hp_max=%d "
+        "profession_level=%d\nui_mode=%d market_tier=%d sell_idx=%d gold=%d in_combat=%d\n",
+        obs[player_base], obs[player_base + 1], obs[player_base + 2], obs[player_base + 3],
+        obs[player_base + 4], obs[player_base + 5], obs[player_base + 6], obs[player_base + 7],
+        obs[player_base + 8], obs[player_base + 9], obs[player_base + 10], obs[player_base + 11],
+        obs[player_base + 12]);
+    offset = append_text(context->text, offset, "equipment=");
+    for (int i = 0; i < 5; i++)
+        offset = append_text(context->text, offset, "%d%s", obs[player_base + 13 + i], i == 4 ? "\n" : ",");
+    offset = append_text(context->text, offset, "inventory=");
+    for (int i = 0; i < 12; i++)
+        offset = append_text(context->text, offset, "%d%s", obs[player_base + 18 + i], i == 11 ? "\n" : ",");
+    offset = append_text(context->text, offset, "is_equipped=");
+    for (int i = 0; i < 12; i++)
+        offset = append_text(context->text, offset, "%d%s", obs[player_base + 30 + i], i == 11 ? "\n" : ",");
+    offset = append_text(context->text, offset,
+        "wander_range=%d ranged=%d goal=%d equipment_attack=%d equipment_defense=%d\n",
+        obs[player_base + 42], obs[player_base + 43], obs[player_base + 44],
+        obs[player_base + 45], obs[player_base + 46]);
+
+    reward_base = player_base + 47;
+    offset = append_text(context->text, offset,
+        "\nREWARD_OBSERVATION\ndeath=%d pioneer=%d combat_bucket=%d profession_bucket=%d "
+        "item_atk_bucket=%d item_def_bucket=%d item_tool_bucket=%d market_buy_bucket=%d "
+        "market_sell_bucket=%d\n",
+        obs[reward_base], obs[reward_base + 1], obs[reward_base + 2], obs[reward_base + 3],
+        obs[reward_base + 4], obs[reward_base + 5], obs[reward_base + 6], obs[reward_base + 7],
+        obs[reward_base + 8]);
+
     if (offset < 0) return -1;
     context->text[STRATEGY_CONTEXT_MAX - 1] = '\0';
     return offset >= STRATEGY_CONTEXT_MAX ? STRATEGY_CONTEXT_MAX - 1 : offset;
