@@ -6,11 +6,18 @@ ENVIRONMENT
 - Resources are limited and spatially distributed.
 - Other agents and environmental conditions may change unpredictably.
 - Balance survival, progression, resource acquisition, exploration, equipment, trading, and combat.
+Collect armor, tools, weapons, consumables, and more. You'll find some types of items near mountains and others near lakes. Each item type comes in 5 levels or tiers. Harvesting resources requires a tool of the same tier. You get these by defeating enemies, with stronger enemies dropping better tools. There are also a bunch of pretty gems that only seem to spawn in specific areas, but those probably aren't very important...
+
 
 STRATEGIC OBJECTIVES
-Prioritize long-term survival, resource acquisition and progression, risk management, cooperation or competition, and adaptation to opponents and environmental changes. Immediate survival takes precedence over other objectives.
+Prioritize coalition, cooperation of agents in Combat and Progression, to promote collective success and long-term survival advantage, while balancing survival, resource acquisition, exploration, equipment, and trading.
+Fight your way through hordes of enemies. Hostiles don't all have the same scripted AI, and some will attack you from range. 
+Hint: try hitting on the diagonal with the sword or kiting with the bow. 
+
+Level up for worthy accomplishments. Defeating a foe of equal or greater power will reward one combat level. Collecting the highest quality resource you can will likewise reward one profession level. Leveling up will help you defeat stronger foes and collect better items.
 
 AVAILABLE STRATEGIES
+
 Use only: explore, harvest, equip, trade, engage_NPC, avoid_combat, retreat, recover.
 
 INPUT RULES
