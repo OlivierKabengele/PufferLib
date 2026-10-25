@@ -146,7 +146,9 @@ def _params_from_puffer_sweep(sweep_config, only_include=None):
 
     for name, param in sweep_config.items():
         if name in ('method', 'metric', 'metric_distribution', 'goal', 'downsample', 'use_gpu', 'prune_pareto',
-                    'sweep_only', 'max_suggestion_cost', 'early_stop_quantile', 'gpus', 'max_runs'):
+                    'sweep_only', 'max_suggestion_cost', 'early_stop_quantile', 'gpus', 'max_runs',
+                    'match_enemy_model_path', 'match_num_games', 'match_enemy_hidden_size',
+                    'match_enemy_num_layers', 'match_max_ticks'):
             continue
 
         assert isinstance(param, dict), f'Param {name} is not a dict'
@@ -544,6 +546,12 @@ class Protein:
         _max_suggestion_cost = sweep_config['max_suggestion_cost'] if 'max_suggestion_cost' in sweep_config else max_suggestion_cost
 
         self.device = torch.device("cuda:0" if _use_gpu and torch.cuda.is_available() else "cpu")
+        print(
+            f"[SWEEP INIT] use_gpu={_use_gpu!r}, "
+            f"type={type(_use_gpu).__name__}, "
+            f"device={self.device}",
+            flush=True,
+        )
         self.hyperparameters = Hyperparameters(sweep_config)
         self.metric_distribution = sweep_config['metric_distribution']
         self.global_search_scale = global_search_scale

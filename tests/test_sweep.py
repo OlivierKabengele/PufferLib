@@ -1,5 +1,6 @@
 import time
 import random
+import sys
 
 import numpy as np
 import torch
@@ -46,6 +47,39 @@ def synthetic_percentile_task(args):
 def synthetic_cutoff_task(args):
     score, cost = synthetic_basic_task(args)
     return score*min(2, np.log10(cost)), cost
+
+def test_sweep_ignores_match_settings():
+    config = {
+        'metric': 'score',
+        'goal': 'maximize',
+        'match_enemy_model_path': '',
+        'match_num_games': 1024,
+        'match_enemy_hidden_size': 0,
+        'match_enemy_num_layers': 0,
+        'match_max_ticks': 4096,
+        'train': {
+            'learning_rate': {
+                'distribution': 'log_normal',
+                'min': 1e-5,
+                'max': 1e-1,
+                'scale': 'auto',
+            },
+        },
+    }
+
+    hypers = pufferlib.sweep.Hyperparameters(config, verbose=False)
+
+    assert list(hypers.flat_spaces) == ['train/learning_rate']
+
+def test_sweep_use_gpu_false_cli_argument(monkeypatch):
+    from pufferlib.pufferl import load_config
+
+    monkeypatch.setattr(
+        sys, 'argv', ['puffer', '--sweep.use-gpu', 'False'])
+
+    args = load_config('nmmo3')
+
+    assert args['sweep']['use_gpu'] is False
 
 def test_sweep(args):
     method = args['sweep']['method']

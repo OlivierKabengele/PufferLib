@@ -244,8 +244,8 @@ struct Log {
     float strategy_decisions;
     float strategy_failures;
     float strategy_updates;
-    float alive_agents;
-    float dead_agents;
+    float comb_lvl;
+    float prof_lvl;
 };
  
 // TODO: This is actually simplex and we should probably use the original impl
@@ -1782,7 +1782,7 @@ void c_reset(MMO* env) {
         //int tier = 1 + env->tiers*level/env->levels;
         int tier = 0;
         while (tier < 1 || tier > env->tiers) {
-            tier = sample_exponential(1, &env->rng);
+            tier = sample_exponential(3.0, &env->rng);
         }
 
         if (spawned) {
@@ -2220,18 +2220,17 @@ void c_step(MMO* env) {
             entity->ui_mode = MODE_SELL_SELECT;
         }
     }
-    int alive_agents = 0;
-    int dead_agents = 0;
+    float comb_lvl = 0;
+    float prof_lvl = 0;
     for (int pid = 0; pid < env->num_agents; pid++) {
-        if (env->players[pid].hp > 0) {
-            alive_agents += 1;
-        } else {
-            dead_agents += 1;
-        }
+        comb_lvl += env->players[pid].comb_lvl;
+        prof_lvl += env->players[pid].prof_lvl;
     }
     // vecenv averages Log fields by episode count before displaying them.
-    env->log.alive_agents = alive_agents * env->log.n;
-    env->log.dead_agents = dead_agents * env->log.n;
+    if (env->num_agents > 0) {
+        env->log.comb_lvl = comb_lvl / env->num_agents * env->log.n;
+        env->log.prof_lvl = prof_lvl / env->num_agents * env->log.n;
+    }
     compute_all_obs(env);
     for (int pid = 0; pid < env->num_agents; pid++) {
         Reward* reward = &env->reward_struct[pid];

@@ -1,4 +1,4 @@
-PROMPT_TEMPLATE = """You are a high-level strategic planner for an agent operating in the Neural MMO 3.0 environment. Your task is to analyze the provided structured context and produce one high-level strategy that guides a low-level reinforcement-learning controller. Do not select primitive actions such as movement or individual attacks; the RL controller handles low-level actions.
+PROMPT_TEMPLATE = """You are a high-level strategic planner for agent operating in the Neural MMO 3.0 environment. Your task is to analyze the provided structured context and produce one high-level strategy that guides a low-level reinforcement-learning controller. Do not select primitive actions such as movement or individual attacks; the RL controller handles low-level actions.
 
 ENVIRONMENT
 - Neural MMO 3.0 is an open-world multi-agent MMO.
@@ -10,7 +10,7 @@ Collect armor, tools, weapons, consumables, and more. You'll find some types of 
 
 
 STRATEGIC OBJECTIVES
-Prioritize coalition, cooperation of agents in Combat and Progression, to promote collective success and long-term survival advantage, while balancing survival, resource acquisition, exploration, equipment, and trading.
+Prioritize always combat against enemies of higher tier levels. Promote coalition, cooperation of agents in Combat and Progression, to promote collective success and long-term survival advantage, while balancing survival, resource acquisition, exploration, equipment, and trading.
 Fight your way through hordes of enemies. Hostiles don't all have the same scripted AI, and some will attack you from range. 
 Hint: try hitting on the diagonal with the sword or kiting with the bow. 
 

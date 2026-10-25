@@ -96,6 +96,11 @@ def query_ollama(strategy_context):
             try:
                 with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
                     payload = json.load(response)
+                    input_tokens = payload["prompt_eval_count"]
+                    output_tokens = payload["eval_count"]
+                    print(f"Input tokens: {input_tokens}", file=sys.stderr)
+                    print(f"Output tokens: {output_tokens}", file=sys.stderr)
+                    print(f"Total tokens: {input_tokens + output_tokens}", file=sys.stderr)
                 break
             except urllib.error.URLError as error:
                 refused = isinstance(error.reason, ConnectionRefusedError)

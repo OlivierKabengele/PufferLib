@@ -162,9 +162,12 @@ def print_dashboard(args, model_size, flat_logs, clear=False, idx=[0],
 
     i = 0
     for k, v in flat_logs.items():
-        if k.startswith('env/') and k != 'env/n':
+        if (k.startswith('env/') and k != 'env/n') or k in ('comb_lvl', 'prof_lvl'):
+            stat = k[4:] if k.startswith('env/') else k
+            if stat in ('alive_agents', 'dead_agents'):
+                continue
             u = left if i % 2 == 0 else right
-            u.add_row(f'{b2}{k[4:]}', f'{b2}{v:.3f}')
+            u.add_row(f'{b2}{stat}', f'{b2}{v:.3f}')
             i += 1
             if i == 30:
                 break
@@ -440,6 +443,33 @@ def sweep(env_name, args=None, pareto=False):
         raise ValueError(f'Invalid sweep method {method}. See pufferlib.sweep')
 
     sweep_obj = sweep_cls(sweep_config)
+
+    if isinstance(sweep_obj, pufferlib.sweep.Protein):
+        print(f"[SWEEP CHECK] device={sweep_obj.device}", flush=True)
+        for name in ("gp_score", "gp_cost"):
+            model = getattr(sweep_obj, name)
+            for param_name, param in model.named_parameters():
+                print(
+                    f"[SWEEP CHECK] {name}.{param_name}: {param.device}",
+                    flush=True,
+                )
+
+        # Prevent CUDA IPC when passing the sweep optimizer into workers.
+        sweep_obj.to('cpu')
+        print(f"[SWEEP CHECK] after CPU move device={sweep_obj.device}", flush=True)
+        for name in ("gp_score", "gp_cost"):
+            model = getattr(sweep_obj, name)
+            for param_name, param in model.named_parameters():
+                print(
+                    f"[SWEEP CHECK] {name}.{param_name}: {param.device}",
+                    flush=True,
+                )
+        assert all(
+            param.device.type == 'cpu'
+            for model in (sweep_obj.gp_score, sweep_obj.gp_cost)
+            for param in model.parameters()
+        ), "ERROR: Sweep optimizer GP parameters are still on CUDA!"
+
     num_experiments = args['sweep']['max_runs']
     ts_default = args['train']['total_timesteps']
     ts_config = sweep_config.get('train', {}).get('total_timesteps', {'min': ts_default, 'max': ts_default})
@@ -684,7 +714,7 @@ def load_config(env_name):
             dtype = type(value)
             parser.add_argument(
                 fmt.replace('_', '-'), default=value,
-                type=lambda v, t=dtype: v if v == 'auto' else t(v),
+                type=lambda v, t=dtype: _parse_config_value(v, t),
             )
 
     parser.add_argument('-h', '--help', default=argparse.SUPPRESS,
@@ -705,6 +735,18 @@ def load_config(env_name):
     for section in p.sections():
         args.setdefault(section, {})
     return dict(args)
+
+def _parse_config_value(value, value_type):
+    if value == 'auto':
+        return value
+    if value_type is bool:
+        normalized = value.strip().lower()
+        if normalized in ('true', '1', 'yes', 'on'):
+            return True
+        if normalized in ('false', '0', 'no', 'off'):
+            return False
+        raise argparse.ArgumentTypeError(f'Expected a boolean value, got {value!r}')
+    return value_type(value)
 
 def main():
     err = 'Usage: puffer [train, eval, sweep, paretosweep, match, llm-action] [env_name] [optional args]. --help for more info'

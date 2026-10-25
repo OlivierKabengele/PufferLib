@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn an NMMO3 strategy context into one validated action decision using Google Gemini."""
+#"""Turn an NMMO3 strategy context into one validated action decision using Google Gemini."""
 
 import json
 import os
@@ -10,7 +10,7 @@ import urllib.request
 from strategy_prompt import build_strategy_prompt
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL = os.getenv("NMMO3_GEMINI_MODEL", "gemini-3-flash-preview")
+MODEL = os.getenv("NMMO3_GEMINI_MODEL", "gemini-3.5-flash-lite")
 REQUEST_TIMEOUT = float(os.getenv("NMMO3_GEMINI_TIMEOUT", "60"))
 
 

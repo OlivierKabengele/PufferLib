@@ -53,6 +53,6 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "strategy_decisions", log->strategy_decisions);
     dict_set(out, "strategy_failures", log->strategy_failures);
     dict_set(out, "strategy_updates", log->strategy_updates);
-    dict_set(out, "alive_agents", log->alive_agents);
-    dict_set(out, "dead_agents", log->dead_agents);
+    dict_set(out, "comb_lvl", log->comb_lvl);
+    dict_set(out, "prof_lvl", log->prof_lvl);
 }

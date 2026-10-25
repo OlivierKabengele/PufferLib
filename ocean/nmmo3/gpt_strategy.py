@@ -9,7 +9,7 @@ import urllib.request
 
 from strategy_prompt import build_strategy_prompt
 
-MODEL = os.getenv("NMMO3_GPT_MODEL", "gpt-4o-mini")
+MODEL = os.getenv("NMMO3_GPT_MODEL", "gpt-5.4-nano")
 REQUEST_TIMEOUT = float(os.getenv("NMMO3_GPT_TIMEOUT", "30"))
 
 
@@ -94,6 +94,10 @@ def query_gpt(strategy_context):
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as response:
             data = json.load(response)
+            usage = data["usage"]
+            print(f"Input tokens: {usage['prompt_tokens']}", file=sys.stderr)
+            print(f"Output tokens: {usage['completion_tokens']}", file=sys.stderr)
+            print(f"Total tokens: {usage['total_tokens']}", file=sys.stderr)
             text = data["choices"][0]["message"]["content"]
             return parse_strategy_response(text)
     except urllib.error.HTTPError as http_err:

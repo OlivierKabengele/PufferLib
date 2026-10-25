@@ -213,6 +213,19 @@ if [ -z "$CUDNN_LFLAG" ]; then
     CUDNN_LFLAG=$(python -c "import nvidia.cudnn, os; print('-L' + os.path.join(nvidia.cudnn.__path__[0], 'lib'))" 2>/dev/null || echo "")
 fi
 
+CUDNN_LIB="-lcudnn"
+if [[ "$CUDNN_LFLAG" == -L* ]]; then
+    CUDNN_LIB_DIR="${CUDNN_LFLAG#-L}"
+    if [ ! -e "$CUDNN_LIB_DIR/libcudnn.so" ]; then
+        for cudnn_lib in "$CUDNN_LIB_DIR"/libcudnn.so.*; do
+            if [ -f "$cudnn_lib" ]; then
+                CUDNN_LIB="-l:$(basename "$cudnn_lib")"
+                break
+            fi
+        done
+    fi
+fi
+
 # NCCL include/lib fallback (mirrors the cuDNN fallback above).
 # Needed when NCCL is provided by the nvidia-nccl-cu12 wheel in the active venv.
 NCCL_IFLAG=""
@@ -300,7 +313,7 @@ if [ -z "$MODE" ]; then
         -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG
         "${WHEEL_RPATH_FLAGS[@]}"
         "${EXTRA_LDFLAGS[@]}"
-        -lcudart -lnccl -lnvidia-ml -lcublas -lcusolver -lcurand -lcudnn
+        -lcudart -lnccl -lnvidia-ml -lcublas -lcusolver -lcurand "$CUDNN_LIB"
         $OMP_LIB $LINK_OPT
         "${SHARED_LDFLAGS[@]}"
         -o "$OUTPUT"
@@ -343,7 +356,7 @@ elif [ "$MODE" = "profile" ]; then
         -Xcompiler=-fopenmp \
         tests/profile_kernels.cu vendor/ini.c \
         "$STATIC_LIB" "$RAYLIB_A" \
-        -lnccl -lnvidia-ml -lcublas -lcurand -lcudnn \
+        -lnccl -lnvidia-ml -lcublas -lcurand "$CUDNN_LIB" \
         -lGL -lm -lpthread $OMP_LIB \
         -o profile
     echo "Built: ./profile"
