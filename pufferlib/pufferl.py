@@ -144,11 +144,13 @@ def print_dashboard(args, model_size, flat_logs, clear=False, idx=[0],
 
     i = 0
     for k, v in flat_logs.items():
+        if k.startswith(('env/action_counts/', 'env/action_percentages/')):
+            continue
         if k.startswith('env/') and k != 'env/n':
             u = left if i % 2 == 0 else right
             u.add_row(f'{b2}{k[4:]}', f'{b2}{v:.3f}')
             i += 1
-            if i == 30:
+            if i == 50:
                 break
 
     if clear:
@@ -191,10 +193,13 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
     '''Single-GPU training worker. Process target for both DDP ranks and sweep trials.'''
     backend = _resolve_backend(args)
     rank = args['rank']
-    run_id = str(int(1000*time.time()))
+
+    from uuid import uuid4
+    run_id = uuid4().hex[:8]
+
     if args['wandb']:
         import wandb
-        run_id = wandb.util.generate_id()
+
         wandb.init(id=run_id, config=args,
             project=args['wandb_project'], group=args['wandb_group'],
             tags=[args['tag']] if args['tag'] is not None else [],
@@ -275,6 +280,13 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
             print_dashboard(args, model_size, flat_logs)
 
         if target_key not in flat_logs:
+            if args['wandb']:
+                action_logs = {
+                    k: v for k, v in flat_logs.items()
+                    if k.startswith('env/action_counts/')
+                }
+                if action_logs:
+                    wandb.log(action_logs, step=flat_logs['agent_steps'])
             continue
 
         if args['wandb']:
@@ -340,7 +352,10 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
 
         next_bin += logged_timesteps / (n - 1)
         for k in metrics:
-            metrics[k][-1] = np.mean(metrics[k][-1])
+            if k.startswith('env/action_counts/'):
+                metrics[k][-1] = metrics[k][-1][-1]
+            else:
+                metrics[k][-1] = np.mean(metrics[k][-1])
             metrics[k].append([])
 
     for k in metrics:

@@ -205,7 +205,6 @@ class PuffeRL:
         config = self.config
         device = self.device
         horizon = config['horizon']
-
         self.state = tuple(torch.zeros_like(s) for s in self.state) if self.state else ()
         o = self.vec_obs
         r = torch.zeros(self.total_agents, device=device)
@@ -513,4 +512,3 @@ def load_policy(args, vec):
         policy.load_state_dict(state_dict)
 
     return policy
-

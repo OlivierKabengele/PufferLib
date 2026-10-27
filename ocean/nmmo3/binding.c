@@ -5,6 +5,7 @@
 #define OBS_TENSOR_T ByteTensor
 
 #define Env MMO
+#define MY_LOG_EXTRA
 #include "vecenv.h"
 
 void my_init(Env* env, Dict* kwargs) {
@@ -49,4 +50,32 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "equip_defense", log->equip_defense);
     dict_set(out, "r", log->r);
     dict_set(out, "c", log->c);
+    dict_set(out, "comb_lvl", log->comb_lvl);
+    dict_set(out, "prof_lvl", log->prof_lvl);
+}
+
+void my_log_extra(StaticVec* vec, Dict* out) {
+    static const char* action_keys[NMMO3_ACTION_COUNT] = {
+        "action_counts/action_0", "action_counts/action_1",
+        "action_counts/action_2", "action_counts/action_3",
+        "action_counts/action_4", "action_counts/action_5",
+        "action_counts/action_6", "action_counts/action_7",
+        "action_counts/action_8", "action_counts/action_9",
+        "action_counts/action_10", "action_counts/action_11",
+        "action_counts/action_12", "action_counts/action_13",
+        "action_counts/action_14", "action_counts/action_15",
+        "action_counts/action_16", "action_counts/action_17",
+        "action_counts/action_18", "action_counts/action_19",
+        "action_counts/action_20", "action_counts/action_21",
+        "action_counts/action_22", "action_counts/action_23",
+        "action_counts/action_24", "action_counts/action_25",
+    };
+    MMO* envs = (MMO*)vec->envs;
+    for (int action = 0; action < NMMO3_ACTION_COUNT; action++) {
+        unsigned long long count = 0;
+        for (int i = 0; i < vec->size; i++) {
+            count += envs[i].action_counts[action];
+        }
+        dict_set(out, action_keys[action], (double)count);
+    }
 }

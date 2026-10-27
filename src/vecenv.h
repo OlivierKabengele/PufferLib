@@ -208,6 +208,9 @@ extern const char* cudaGetErrorString(cudaError_t);
 // Forward declare env-provided functions (defined in binding.c after this include)
 void my_init(Env* env, Dict* kwargs);
 void my_log(Log* log, Dict* out);
+#ifdef MY_LOG_EXTRA
+void my_log_extra(StaticVec* vec, Dict* out);
+#endif
 
 #ifdef MY_USES_PERM
 // Env-provided: populate per-slot pointer arrays on env, given the global slot
@@ -689,6 +692,9 @@ void static_vec_log(StaticVec* vec, Dict* out) {
     Env* envs = (Env*)vec->envs;
     Log aggregate;
     float n = static_vec_aggregate_logs(vec, &aggregate);
+#ifdef MY_LOG_EXTRA
+    my_log_extra(vec, out);
+#endif
     if (n == 0) {
         return;
     }
@@ -702,6 +708,9 @@ void static_vec_log(StaticVec* vec, Dict* out) {
 void static_vec_eval_log(StaticVec* vec, Dict* out) {
     Log aggregate;
     float n = static_vec_aggregate_logs(vec, &aggregate);
+#ifdef MY_LOG_EXTRA
+    my_log_extra(vec, out);
+#endif
     if (n == 0) {
         return;
     }

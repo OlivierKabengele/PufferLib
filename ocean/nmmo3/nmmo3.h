@@ -69,6 +69,8 @@
 #define ATN_RIGHT_SHIFT 24
 #define ATN_LEFT_SHIFT 25
 
+#define NMMO3_ACTION_COUNT 26
+
 // Entity types
 #define ENTITY_NULL 0
 #define ENTITY_PLAYER 1
@@ -234,6 +236,8 @@ struct Log {
     float equip_defense;
     float r;
     float c;
+    float comb_lvl;
+    float prof_lvl;
 };
  
 // TODO: This is actually simplex and we should probably use the original impl
@@ -714,6 +718,7 @@ struct MMO {
     RespawnBuffer* enemy_respawn_buffer;
     RespawnBuffer* drop_respawn_buffer;
     Log log;
+    unsigned long long action_counts[NMMO3_ACTION_COUNT];
     unsigned int rng;
     float reward_combat_level;
     float reward_prof_level;
@@ -748,6 +753,8 @@ void add_player_log(MMO* env, int pid) {
     log->equip_defense += player->equipment_defense;
     log->r += player->r;
     log->c += player->c;
+    log->comb_lvl += player->comb_lvl;
+    log->prof_lvl += player->prof_lvl;
     log->episode_return += (
         ret->comb_lvl + ret->prof_lvl
         + ret->item_atk_lvl + ret->item_def_lvl
@@ -1842,6 +1849,7 @@ void c_reset(MMO* env) {
 void c_step(MMO* env) {
     env->tick += 1;
     int tick = env->tick;
+    memset(env->action_counts, 0, sizeof(env->action_counts));
 
     // Respawn resources
     RespawnBuffer* buffer = env->resource_respawn_buffer;
@@ -1882,6 +1890,12 @@ void c_step(MMO* env) {
     for (int pid = 0; pid < env->num_agents + env->num_enemies; pid++) {
         Entity* entity = get_entity(env, pid);
         entity->time_alive += 1;
+        if (pid < env->num_agents) {
+            int action = (int)env->actions[pid];
+            if (action >= 0 && action < NMMO3_ACTION_COUNT) {
+                env->action_counts[action]++;
+            }
+        }
         int entity_type = entity->type;
         int r = entity->r;
         int c = entity->c;
@@ -3170,5 +3184,3 @@ int c_render(MMO* env) {
     }
     return action;
 }
-
-
