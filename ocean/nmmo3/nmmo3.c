@@ -3,6 +3,9 @@
 #include <string.h>
 #include "puffernet.h"
 #include "nmmo3.h"
+/* Single translation unit: nmmo3.h contains definitions. */
+#include "strategic_context.c"
+#include "strategic_executor.c"
 
 // Only run 1 agent in the C version
 // You can run the full 1024 on GPU
@@ -182,6 +185,13 @@ void demo(int num_players) {
     c_reset(&env);
     c_render(&env);
 
+    SEStrategicRuntime strategic = {0};
+    const char *provider = getenv("NMMO_STRATEGIC_PROVIDER");
+    int influence = getenv("NMMO_STRATEGIC_INFLUENCE") ?
+        atoi(getenv("NMMO_STRATEGIC_INFLUENCE")) : 20;
+    if (provider && se_runtime_start(&strategic, num_players, provider, influence) != 0)
+        fprintf(stderr, "Strategic runtime initialization failed: RL-only mode\n");
+
     float human_action = ATN_NOOP;
     bool human_mode = false;
     int i = 1;
@@ -190,7 +200,9 @@ void demo(int num_players) {
             human_mode = !human_mode;
         }
         if (i % 36 == 0) {
+            if (!human_mode) se_runtime_before_action(&strategic, &env);
             forward(net, env.observations, env.terminals, env.actions);
+            if (!human_mode) se_runtime_guide_actions(&strategic, &env);
             if (human_mode) {
                 env.actions[0] = human_action;
             }
@@ -205,6 +217,7 @@ void demo(int num_players) {
         i = (i + 1) % 36;
     }
 
+    se_runtime_stop(&strategic);
     free_mmonet(net);
     free(weights);
     free_allocated_mmo(&env);

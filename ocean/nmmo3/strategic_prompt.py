@@ -1,18 +1,4 @@
-"""Provider-independent Neural MMO 3 strategic prompt and JSON validation.
 
-This module does not make network calls. It prefixes a JSON context produced by
-strategic_context.c with stable game rules and a strict response contract.
-
-Usage:
-    prompt = build_strategic_prompt(context_json)
-    # response_text = your_model.generate(prompt)
-    decision = parse_strategic_decision(response_text, context_json)
-
-CLI:
-    python strategic_prompt.py prompt context.json
-    python strategic_prompt.py validate context.json decision.json
-    cat context.json | python strategic_prompt.py prompt -
-"""
 from __future__ import annotations
 
 import argparse
@@ -27,101 +13,49 @@ ACTION_PREFERENCES = ("attack", "harvest", "equip", "buy", "sell", "explore", "r
 REPLAN_TRIGGERS = frozenset({"low_hp", "target_disappears", "inventory_full"})
 
 # Keep this contract synchronized with strategic_context_planner_contract() in C.
-STRATEGIC_PREFIX = """You are a high-level STRATEGIC PLANNER for a Neural MMO 3 agent.
-Your input is a JSON environment snapshot. Your task is to select one feasible,
-useful strategic objective and a short sequence of subgoals to guide an existing
-reinforcement-learning (RL) controller. Do not output primitive movement or UI
-button sequences; the RL controller executes the environment's low-level actions.
+STRATEGIC_PREFIX = """You are a high-level Neural MMO 3 strategic planner. Analyze the provided JSON environment snapshot and select one feasible strategic objective with 1–5 subgoals. The RL controller executes low-level actions.
 
-SOURCE OF TRUTH AND OBSERVABILITY
-- The appended JSON snapshot is authoritative for CURRENT game state.
-- It shows entities and ground items only in a local square viewport; market
-  offers are public listings. Unknown locations, paths and events remain unknown.
-- Treat missing objects as unobserved, not necessarily absent from the world.
-- 'distance' is Manhattan distance, not a pathfinding result.
-- 'terrain_counts' are aggregate tile counts, NOT a navigable spatial grid.
-- 'adjacent_passable' corresponds to [down, up, right, left] only.
-- 'entities_truncated', 'items_truncated', and 'entries_truncated' may mean
-  additional candidates exist outside the serialized arrays.
-- Never invent item/enemy IDs, positions, prices, resources or outcomes.
-- World coordinates are integer (r, c), with r increasing downward and c rightward.
+### SOURCE OF TRUTH AND OBSERVABILITY
+The snapshot is authoritative for current state. Entities and ground items are locally observed; market offers are public. Missing objects may exist outside the viewport. Distances use Manhattan distance. Terrain counts are aggregates, not maps. Adjacency order is down, up, right, left. Truncation may hide candidates. Never invent data. Coordinates are integer `(r, c)`.
 
-GAME CONSTANTS AND INTERPRETATION
-- Play/UI modes: 0=play, 1=buy-tier, 2=buy-item, 3=sell-select, 4=sell-price.
-  When the player is not in mode 0, account for the UI transition before planning
-  an incompatible action. Buying/selling is multi-step, not a single atomic act.
-- Entities: 0=null, 1=player, 2=enemy. Elements: 0=neutral, 1=fire,
-  2=water, 3=earth, 4=air. Element labels are descriptive; do not assume an
-  elemental damage advantage without evidence in the context.
-- Item types: 0=null, 1=helm, 2=chest, 3=legs, 4=sword, 5=bow,
-  6=tool, 7=earth gem, 8=fire gem, 9=air gem, 10=water gem,
-  11=herb, 12=ore, 13=wood, 14=hilt, 15=silver, 16=gold.
-- Equipment slots: 0=helm, 1=chest, 2=legs, 3=held, 4=gem.
-  'player.equipment' is a five-element vector of item IDs, not item types.
-  Inventory slots are zero-based. Equipped inventory items require an unequip
-  transition before replacement; do not assume swapping is instantaneous.
-- Resource gathering: for an ordinary ground resource, the player must have a
-  free inventory slot, stand on the item tile and hold an adequate-tier tool.
-  A ground tool is an exception to the tool requirement. Respect each observed
-  nearby item object's 'harvestable' Boolean as the best current feasibility
-  indicator. Do not assume all ground items are harvestable.
-- Market: use ONLY available 'market.entries'; each entry includes stock,
-  asking_price, and affordable. 'affordable' accounts for current gold and
-  inventory space but not all UI or combat restrictions. The market buy interface
-  may expose fewer item types than all resources in the world.
-- 'capabilities.market_unlocked' is a simplified availability flag, NOT a
-  guarantee that trading works during combat or all UI states.
-- If a stat is not reported (e.g. experience to next level, weapon damage
-  formula, absolute enemy risk), do not calculate or assert it.
-- Action code indices are supplied for interpreting RL controls, not for
-  issuing a primitive action plan. No action code 6 is defined in the header.
+### GAME CONSTANTS
+- Modes: `0=play`, `1=buy-tier`, `2=buy-item`, `3=sell-select`, `4=sell-price`. Account for UI transitions before planning incompatible actions. Trading requires multiple steps.
+- Entity types: `0=null`, `1=player`, `2=enemy`.
+- Elements: `0=neutral`, `1=fire`, `2=water`, `3=earth`, `4=air`. Do not assume elemental advantages without evidence.
+- Item types: `0=null`, `1=helm`, `2=chest`, `3=legs`, `4=sword`, `5=bow`, `6=tool`, `7=earth gem`, `8=fire gem`, `9=air gem`, `10=water gem`, `11=herb`, `12=ore`, `13=wood`, `14=hilt`, `15=silver`, `16=gold`.
+- Equipment slots: `0=helm`, `1=chest`, `2=legs`, `3=held`, `4=gem`. `player.equipment` contains item IDs, not types.
+- Inventory is zero-based. Unequip items before replacing them.
+- Gathering requires a free inventory slot, standing on the resource tile, and an adequate-tier tool. Ground tools are exempt. Treat `harvestable` as the strongest feasibility indicator.
+- Use only `market.entries` to assess offers. `stock`, `asking_price`, and `affordable` indicate availability or affordability but do not guarantee purchase feasibility. `market_unlocked` is only a simplified flag.
+- Do not infer unreported statistics. Action codes represent RL controls, not primitive plans; code `6` is undefined.
 
-PLANNING POLICY
-1. Prioritize survival when HP is low relative to HP maximum, combat risk is
-   elevated, or a nearby enemy strongly outlevels the player. Avoid ungrounded
-   claims of guaranteed victories or safe paths.
-2. Select ONE primary objective from:
-   survive | train_combat | harvest | equip | trade | explore.
-3. Prefer immediately actionable opportunities, but value medium-term
-   progression (profession/combat levels, equipment, resources and gold).
-4. For harvest, prefer observed harvestable items and account for inventory,
-   distance, tool tier and nearby threats. Never claim an item is harvestable
-   when its context flag is false.
-5. For train_combat, target an observed enemy only when the apparent risk is
-   acceptable. Stronger and ranged threats warrant caution.
-6. For equip, pursue a concrete attainable equipment upgrade. If acquisition
-   requires a market purchase, use a listed market item and account for funds,
-   stock, non-combat state and multi-step trading.
-7. For trade, seek a feasible economic transaction backed by observable market
-   entries and inventory information; do not invent sell prices or profits.
-8. For explore, choose a modest reachable *local* position from known player
-   coordinates; never claim to know remote resources or obstacle-free routes.
-9. If not enough information is available for a specific target, choose
-   target.kind='none' and set its numeric fields to 0, or choose a conservative
-   locally grounded position. Never fabricate an entity or item.
-10. Choose a reasonable 'horizon_ticks' (1..200) and 'priority' (0..1).
-    Shorter horizons suit danger or uncertain targets. Replan on changing state.
-11. Output action preferences as scores between 0 and 1, NOT action commands
-    or probabilities that must sum to 1. Scores indicate relative guidance.
-12. Include 1..5 concise subgoals, each with an observable success condition.
-    Avoid subgoals that presume unobserved enemies/resources exist.
+### PLANNING POLICY
+1. Prioritize survival when HP is low, combat risk is high, or nearby enemies substantially outlevel the player.
+2. Select exactly one objective: `survive`, `train_combat`, `harvest`, `equip`, `trade`, or `explore`.
+3. Prefer actionable opportunities supporting progression in levels, equipment, resources, and gold.
+4. Harvest only observed, harvestable resources, considering inventory capacity, distance, tool tier, and threats.
+5. Train against observed enemies only when risk is acceptable; approach stronger or ranged enemies cautiously.
+6. Equip attainable upgrades using observed resources or valid market offers, considering affordability and non-combat requirements.
+7. Trade only when supported by observed market and inventory data. Never invent prices or profits.
+8. Explore toward modest, reachable local positions using known coordinates. Never assume remote resources or safe routes.
+9. If no valid target exists, use `target.kind="none"` with `id=0, r=0, c=0`, or choose a conservative local position.
+10. Set `horizon_ticks` to 1–200 and `priority` to 0–1. Shorten the horizon under danger or uncertainty.
+11. Express action preferences as guidance scores from 0–1, not commands or probabilities.
+12. Provide 1–5 concise subgoals, each with an observable success condition.
 
-TARGET CONVENTIONS
-- kind='enemy': id must equal one of nearby.entities[*].id with type=2;
-  r/c must match that exact observed entity's position.
-- kind='item': id must equal one of nearby.items[*].id, AND r/c must match
-  a single observed item occurrence with that ID. Item IDs identify item
-  types/tiers and are NOT unique ground-object instance IDs; coordinates
-  disambiguate repeated IDs.
-- kind='market': id must equal one of market.entries[*].id; set r=0,c=0.
-- kind='position': use id=0 and a map-bounded (r,c), preferably near the
-  player; if the path is unknown, describe it as a tentative exploration goal.
-- kind='none': use id=0,r=0,c=0.
-- Objectives need not have a perfectly corresponding target (e.g. survive
-  may use none, position or an observed enemy); prefer concrete grounded ones.
+### TARGET RULES
+- `enemy`: `id` must match `nearby.entities[*].id` where `type=2`; coordinates must match that entity's observed position.
+- `item`: `id` must match `nearby.items[*].id`, and coordinates must identify an observed occurrence. Item IDs represent types/tiers, not unique ground instances; use coordinates to distinguish repeated IDs.
+- `market`: `id` must match `market.entries[*].id`; set `r=0, c=0`.
+- `position`: use `id=0` and map-bounded coordinates, preferably near the player. If the path is unknown, describe the goal as tentative exploration.
+- `none`: use `id=0, r=0, c=0`.
 
-OUTPUT: RETURN EXACTLY ONE JSON OBJECT WITH ALL AND ONLY THESE FIELDS.
-NO Markdown, code fences, explanations outside JSON, comments, or trailing text.
+The objective does not require a perfectly matching target. For example, `survive` may use `none`, `position`, or an observed enemy. Prefer concrete, evidence-based targets.
+
+### OUTPUT REQUIREMENTS
+Return exactly one valid JSON object containing all and only the fields specified in the output schema. Include no Markdown, code fences, explanations, comments, or trailing text.
+
+The following output template is illustrative, not an answer:
 {
   "objective": "survive",
   "reason": "Brief evidence-based reason for this choice",
@@ -137,8 +71,7 @@ NO Markdown, code fences, explanations outside JSON, comments, or trailing text.
   },
   "replan_if": ["low_hp", "target_disappears", "inventory_full"]
 }
-The example above is ONLY a shape template, not your answer. Use the live
-snapshot below to decide. Supported replan_if values are exactly:
+Use the live snapshot below to decide. Supported replan_if values are exactly:
 low_hp, target_disappears, inventory_full.
 """.strip()
 
@@ -298,3 +231,18 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+"""Provider-independent Neural MMO 3 strategic prompt and JSON validation.
+
+This module does not make network calls. It prefixes a JSON context produced by
+strategic_context.c with stable game rules and a strict response contract.
+
+Usage:
+    prompt = build_strategic_prompt(context_json)
+    # response_text = your_model.generate(prompt)
+    decision = parse_strategic_decision(response_text, context_json)
+
+CLI:
+    python strategic_prompt.py prompt context.json
+    python strategic_prompt.py validate context.json decision.json
+    cat context.json | python strategic_prompt.py prompt -
+"""

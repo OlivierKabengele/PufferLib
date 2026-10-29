@@ -148,7 +148,7 @@ def print_dashboard(args, model_size, flat_logs, clear=False, idx=[0],
             u = left if i % 2 == 0 else right
             u.add_row(f'{b2}{k[4:]}', f'{b2}{v:.3f}')
             i += 1
-            if i == 30:
+            if i == 50:
                 break
 
     if clear:
@@ -177,7 +177,39 @@ def _resolve_backend(args):
         return PuffeRL
     return _C
 
+def _configure_nmmo_strategy(args):
+    """Configure the C training worker; no shell exports required for mode selection."""
+    provider = 'gpt' if args.get('gpt_strategy') else 'gemini' if args.get('gemini_strategy') else None
+    if not provider:
+        os.environ.pop('NMMO_STRATEGIC_PROVIDER', None)
+        return
+    if args.get('env_name') != 'nmmo3':
+        raise ValueError('--gpt-strategy/--gemini-strategy are supported for nmmo3 only')
+    influence = args.get('strategy_influence', 20)
+    if not isinstance(influence, int) or not 0 <= influence <= 100:
+        raise ValueError('--strategy-influence must be between 0 and 100')
+    supplied = args.get('strategy_bridge_path')
+    base = os.path.dirname(os.path.realpath(__file__))
+    cwd = os.getcwd()
+    candidates = ([supplied] if supplied else [
+        os.path.join(cwd, 'strategic_bridge.py'),
+        os.path.join(cwd, 'resources', 'nmmo3', 'strategic_bridge.py'),
+        os.path.join(base, 'strategic_bridge.py'),
+        os.path.join(base, 'resources', 'nmmo3', 'strategic_bridge.py'),
+        os.path.join(os.path.dirname(base), 'resources', 'nmmo3', 'strategic_bridge.py'),
+    ])
+    path = next((os.path.realpath(p) for p in candidates if p and os.path.isfile(p)), None)
+    if path is None:
+        raise FileNotFoundError('Cannot locate strategic_bridge.py; place it in resources/nmmo3 or use --strategy-bridge-path')
+    os.environ['NMMO_STRATEGIC_PROVIDER'] = provider
+    os.environ['NMMO_STRATEGIC_INFLUENCE'] = str(influence)
+    os.environ['NMMO_STRATEGIC_BRIDGE'] = path
+    os.environ['NMMO_STRATEGIC_PYTHON'] = sys.executable
+    print(f'[strategy] {provider} enabled for native nmmo3 training; 500-tick request cooldown; bridge={path}', flush=True)
+
+
 def _train_worker(args):
+    _configure_nmmo_strategy(args)
     backend = _resolve_backend(args)
     pufferl = backend.create_pufferl(args)
     args.pop('nccl_id', None)
@@ -189,14 +221,16 @@ def _train_worker(args):
 
 def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
     '''Single-GPU training worker. Process target for both DDP ranks and sweep trials.'''
+    _configure_nmmo_strategy(args)
     backend = _resolve_backend(args)
     rank = args['rank']
 
+    from uuid import uuid4
+    run_id = uuid4().hex[:8]
+
     if args['wandb']:
         import wandb
-        from wandb.sdk.lib.runid import generate_id
 
-        run_id = generate_id()
         wandb.init(id=run_id, config=args,
             project=args['wandb_project'], group=args['wandb_group'],
             tags=[args['tag']] if args['tag'] is not None else [],
@@ -217,6 +251,19 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
 
     log_dir = os.path.join(args['log_dir'], args['env_name'])
     os.makedirs(log_dir, exist_ok=True)
+
+    # Provide a per-run telemetry journal to LLM planner subprocesses.
+    # The subprocess need not import wandb; the training process owns the run.
+    token_reader = None
+    token_samples = []
+    if args.get('gpt_strategy') or args.get('gemini_strategy'):
+        try:
+            from pufferlib.strategic_tokens import TokenJournalReader
+        except ImportError:
+            from strategic_tokens import TokenJournalReader
+        token_path = os.path.join(log_dir, f'{run_id}_llm_tokens.jsonl')
+        os.environ['NMMO_STRATEGY_TOKEN_LOG'] = token_path
+        token_reader = TokenJournalReader(token_path)
 
     try:
         pufferl = backend.create_pufferl(args)
@@ -263,12 +310,30 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
             model_path = os.path.join(checkpoint_dir, f'{pufferl.global_step:016d}.bin')
             backend.save_weights(pufferl, model_path)
 
+        # Capture provider token usage even if dashboard logging is rate-limited.
+        if token_reader is not None:
+            token_samples.extend(token_reader.poll())
+
         # Rate limit, but always log for eval to maintain determinism
         if time.time() < pufferl.last_log_time + 0.6 and epoch < train_epochs - 1:
             continue
 
         logs = backend.eval_log(pufferl) if epoch >= train_epochs else backend.log(pufferl)
         flat_logs = {**flat_logs, **dict(unroll_nested_dict(logs))}
+        if token_reader is not None:
+            flat_logs.update(token_reader.summary())
+            if token_samples:
+                last = token_samples[-1]
+                if last.get('Input_tokens') is not None:
+                    flat_logs['llm/Input_tokens'] = last['Input_tokens']
+                if last.get('Output_tokens') is not None:
+                    flat_logs['llm/Output_tokens'] = last['Output_tokens']
+                valid_inputs = [r['Input_tokens'] for r in token_samples if isinstance(r.get('Input_tokens'), int)]
+                valid_outputs = [r['Output_tokens'] for r in token_samples if isinstance(r.get('Output_tokens'), int)]
+                if valid_inputs:
+                    flat_logs['llm/input_tokens_mean'] = sum(valid_inputs) / len(valid_inputs)
+                if valid_outputs:
+                    flat_logs['llm/output_tokens_mean'] = sum(valid_outputs) / len(valid_outputs)
 
         if epoch < train_epochs:
             selfplay.step(pufferl, backend, pool_state, flat_logs, epoch)
@@ -292,6 +357,25 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
         elif flat_logs['env/n'] > args['eval_episodes']:
             break
 
+
+    if token_reader is not None:
+        token_samples.extend(token_reader.poll())
+        if args['wandb'] and token_samples:
+            # One histogram of all requests, including invalid-response retries.
+            input_values = [r['Input_tokens'] for r in token_samples if isinstance(r.get('Input_tokens'), int)]
+            output_values = [r['Output_tokens'] for r in token_samples if isinstance(r.get('Output_tokens'), int)]
+            histogram_logs = {}
+            if input_values:
+                histogram_logs['llm/input_tokens_distribution'] = wandb.Histogram(input_values)
+            if output_values:
+                histogram_logs['llm/output_tokens_distribution'] = wandb.Histogram(output_values)
+            histogram_logs.update(token_reader.summary())
+            # W&B table gives per-call distribution and retry visibility.
+            table = wandb.Table(columns=['provider', 'model', 'tick', 'Input_tokens', 'Output_tokens', 'Total_tokens', 'Reasoning_tokens'])
+            for r in token_samples:
+                table.add_data(*[r.get(k) for k in ('provider', 'model', 'tick', 'Input_tokens', 'Output_tokens', 'Total_tokens', 'Reasoning_tokens')])
+            histogram_logs['llm/token_requests'] = table
+            wandb.log(histogram_logs, step=flat_logs.get('agent_steps'))
 
     print_dashboard(args, model_size, flat_logs)
     # Match-mode trials may have early-stopped before the in-loop save fired;
@@ -605,6 +689,15 @@ def load_config(env_name):
     parser.add_argument('--wandb-group', type=str, default='debug')
     parser.add_argument('--tag', type=str, default=None, help='Tag for experiment')
     parser.add_argument('--slowly', action='store_true', help='Use PyTorch training backend')
+    strategy_flags = parser.add_mutually_exclusive_group()
+    strategy_flags.add_argument('--gpt-strategy', action='store_true',
+        help='Guide native nmmo3 RL training using GPT decisions (>=500 ticks between requests)')
+    strategy_flags.add_argument('--gemini-strategy', action='store_true',
+        help='Guide native nmmo3 RL training using Gemini decisions (>=500 ticks between requests)')
+    parser.add_argument('--strategy-influence', type=int, default=20,
+        help='Percent of eligible actions to steer toward strategic goal (0-100)')
+    parser.add_argument('--strategy-bridge-path', type=str, default=None,
+        help='Optional location of strategic_bridge.py (auto-discovered by default)')
     parser.add_argument('--save-frames', type=int, default=0)
     parser.add_argument('--gif-path', type=str, default='eval.gif')
     parser.add_argument('--fps', type=float, default=15)

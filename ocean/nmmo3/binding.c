@@ -1,4 +1,62 @@
+/* Rename originals so vecenv.h calls the strategy-aware wrappers below. */
+#define c_step nmmo3_base_c_step
+#define c_reset nmmo3_base_c_reset
+#define c_close nmmo3_base_c_close
 #include "nmmo3.h"
+#undef c_step
+#undef c_reset
+#undef c_close
+#include "strategic_context.c"
+#include "strategic_executor.c"
+/* Only the first env in each worker uses remote planning by default.
+ * Other envs preserve original behavior, avoiding thousands of network calls.
+ * This file is compiled into the native PufferLib environment backend.
+ */
+static MMO *nmmo_strategy_env = NULL;
+static SEStrategicRuntime nmmo_strategy_runtime = {0};
+static int nmmo_strategy_initialized = 0;
+
+static void nmmo_strategy_release(MMO *env) {
+    if (env == nmmo_strategy_env) {
+        se_runtime_stop(&nmmo_strategy_runtime);
+        nmmo_strategy_env = NULL;
+        nmmo_strategy_initialized = 0;
+    }
+}
+
+void c_reset(MMO *env) {
+    if (env == nmmo_strategy_env) {
+        se_runtime_episode_reset(&nmmo_strategy_runtime);
+    }
+    nmmo3_base_c_reset(env);
+    const char *provider = getenv("NMMO_STRATEGIC_PROVIDER");
+    if (!provider || !*provider || nmmo_strategy_env != NULL) return;
+    const char *inf = getenv("NMMO_STRATEGIC_INFLUENCE");
+    int influence = inf ? atoi(inf) : 20;
+    if (se_runtime_start(&nmmo_strategy_runtime, 1, provider, influence) == 0) {
+        nmmo_strategy_env = env;
+        nmmo_strategy_initialized = 1;
+        fprintf(stderr, "[strategy] PufferLib training enabled, provider=%s, influence=%d%%, min_interval=%d ticks\n",
+                provider, influence, SE_MIN_LLM_TICKS);
+    } else {
+        fprintf(stderr, "[strategy] WARNING: runtime initialization failed; original RL fallback\n");
+    }
+}
+
+void c_step(MMO *env) {
+    if (nmmo_strategy_initialized && env == nmmo_strategy_env) {
+        /* Executed inside native PufferLib rollouts, after policy actions were produced. */
+        se_runtime_before_action(&nmmo_strategy_runtime, env);
+        se_runtime_guide_actions(&nmmo_strategy_runtime, env);
+    }
+    nmmo3_base_c_step(env);
+}
+
+void c_close(MMO *env) {
+    nmmo_strategy_release(env);
+    nmmo3_base_c_close(env);
+}
+
 #define OBS_SIZE 1707
 #define NUM_ATNS 1
 #define ACT_SIZES {26}
@@ -70,6 +128,23 @@ void my_log_extra(StaticVec* vec, Dict* out) {
         "action_counts/action_22", "action_counts/action_23",
         "action_counts/action_24", "action_counts/action_25",
     };
+    if (nmmo_strategy_initialized) {
+        dict_set(out, "Input_tokens", (double)nmmo_strategy_runtime.input_tokens);
+        dict_set(out, "Output_tokens", (double)nmmo_strategy_runtime.output_tokens);
+        dict_set(out, "LLM_last_input_tokens", (double)nmmo_strategy_runtime.last_input_tokens);
+        dict_set(out, "LLM_last_output_tokens", (double)nmmo_strategy_runtime.last_output_tokens);
+        dict_set(out, "strategy_decisions", (double)nmmo_strategy_runtime.strategy_decisions);
+        dict_set(out, "strategy_updates", (double)nmmo_strategy_runtime.strategy_updates);
+        dict_set(out, "strategy_failure", (double)nmmo_strategy_runtime.strategy_failure);
+    } else {
+        dict_set(out, "Input_tokens", 0.0);
+        dict_set(out, "Output_tokens", 0.0);
+        dict_set(out, "LLM_last_input_tokens", 0.0);
+        dict_set(out, "LLM_last_output_tokens", 0.0);
+        dict_set(out, "strategy_decisions", 0.0);
+        dict_set(out, "strategy_updates", 0.0);
+        dict_set(out, "strategy_failure", 0.0);
+    }
     MMO* envs = (MMO*)vec->envs;
     for (int action = 0; action < NMMO3_ACTION_COUNT; action++) {
         unsigned long long count = 0;
@@ -78,4 +153,32 @@ void my_log_extra(StaticVec* vec, Dict* out) {
         }
         dict_set(out, action_keys[action], (double)count);
     }
+}
+
+/* Optional explicit host callbacks for PufferLib. These do not change its
+ * observations, action space, or training loop. A Python/native host can
+ * call these through an extension binding when exposed in its build system.
+ * Never run blocking LLM requests in my_log or each vector environment tick.
+ */
+int nmmo_strategic_snapshot(MMO* env, int agent_id, char* json, size_t capacity) {
+    return strategic_context_build_json(env, agent_id, 0, json, capacity);
+}
+void nmmo_strategic_executor_init(SEStrategicExecutor* executor, int agent_id) {
+    se_init(executor, agent_id);
+}
+int nmmo_strategic_executor_tick(MMO* env, int agent_id,
+                                 SEStrategicExecutor* executor,
+                                 SEStrategicGuidance* guidance) {
+    StrategicContext ctx;
+    if (!executor || !guidance || strategic_context_collect(env,agent_id,0,&ctx)) return -1;
+    se_update(executor,&ctx);
+    se_guidance(executor,&ctx,guidance);
+    return se_can_request(executor,ctx.tick);
+}
+int nmmo_strategic_executor_install(MMO* env, int agent_id,
+                                    SEStrategicExecutor* executor,
+                                    const SEStrategicPlan* plan) {
+    StrategicContext ctx;
+    if (!executor || !plan || strategic_context_collect(env,agent_id,0,&ctx)) return -1;
+    return se_install(executor,plan,&ctx);
 }

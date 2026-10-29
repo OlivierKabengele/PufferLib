@@ -144,13 +144,11 @@ def print_dashboard(args, model_size, flat_logs, clear=False, idx=[0],
 
     i = 0
     for k, v in flat_logs.items():
-        if k.startswith(('env/action_counts/', 'env/action_percentages/')):
-            continue
         if k.startswith('env/') and k != 'env/n':
             u = left if i % 2 == 0 else right
             u.add_row(f'{b2}{k[4:]}', f'{b2}{v:.3f}')
             i += 1
-            if i == 50:
+            if i == 60:
                 break
 
     if clear:
@@ -179,7 +177,44 @@ def _resolve_backend(args):
         return PuffeRL
     return _C
 
+def _configure_nmmo_strategy(args):
+    """Configure the C training worker; no shell exports required for mode selection."""
+    provider = ('gpt' if args.get('gpt_strategy') else
+                'gemini' if args.get('gemini_strategy') else
+                'ollama' if args.get('ollama_strategy') else None)
+    if not provider:
+        os.environ.pop('NMMO_STRATEGIC_PROVIDER', None)
+        return
+    if args.get('env_name') != 'nmmo3':
+        raise ValueError('--gpt-strategy/--gemini-strategy/--ollama-strategy are supported for nmmo3 only')
+    influence = args.get('strategy_influence', 20)
+    if not isinstance(influence, int) or not 0 <= influence <= 100:
+        raise ValueError('--strategy-influence must be between 0 and 100')
+    supplied = args.get('strategy_bridge_path')
+    base = os.path.dirname(os.path.realpath(__file__))
+    cwd = os.getcwd()
+    candidates = ([supplied] if supplied else [
+        os.path.join(cwd, 'strategic_bridge.py'),
+        os.path.join(cwd, 'resources', 'nmmo3', 'strategic_bridge.py'),
+        os.path.join(base, 'strategic_bridge.py'),
+        os.path.join(base, 'resources', 'nmmo3', 'strategic_bridge.py'),
+        os.path.join(os.path.dirname(base), 'resources', 'nmmo3', 'strategic_bridge.py'),
+        os.path.join(os.path.dirname(base), 'ocean', 'nmmo3', 'strategic_bridge.py'),
+    ])
+    path = next((os.path.realpath(p) for p in candidates if p and os.path.isfile(p)), None)
+    if path is None:
+        raise FileNotFoundError(
+            'Cannot locate strategic_bridge.py; place it in resources/nmmo3 or ocean/nmmo3, '
+            'or use --strategy-bridge-path')
+    os.environ['NMMO_STRATEGIC_PROVIDER'] = provider
+    os.environ['NMMO_STRATEGIC_INFLUENCE'] = str(influence)
+    os.environ['NMMO_STRATEGIC_BRIDGE'] = path
+    os.environ['NMMO_STRATEGIC_PYTHON'] = sys.executable
+    print(f'[strategy] {provider} enabled for native nmmo3 training; 500-tick request cooldown; bridge={path}', flush=True)
+
+
 def _train_worker(args):
+    _configure_nmmo_strategy(args)
     backend = _resolve_backend(args)
     pufferl = backend.create_pufferl(args)
     args.pop('nccl_id', None)
@@ -191,6 +226,7 @@ def _train_worker(args):
 
 def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
     '''Single-GPU training worker. Process target for both DDP ranks and sweep trials.'''
+    _configure_nmmo_strategy(args)
     backend = _resolve_backend(args)
     rank = args['rank']
 
@@ -280,13 +316,6 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
             print_dashboard(args, model_size, flat_logs)
 
         if target_key not in flat_logs:
-            if args['wandb']:
-                action_logs = {
-                    k: v for k, v in flat_logs.items()
-                    if k.startswith('env/action_counts/')
-                }
-                if action_logs:
-                    wandb.log(action_logs, step=flat_logs['agent_steps'])
             continue
 
         if args['wandb']:
@@ -352,10 +381,7 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
 
         next_bin += logged_timesteps / (n - 1)
         for k in metrics:
-            if k.startswith('env/action_counts/'):
-                metrics[k][-1] = metrics[k][-1][-1]
-            else:
-                metrics[k][-1] = np.mean(metrics[k][-1])
+            metrics[k][-1] = np.mean(metrics[k][-1])
             metrics[k].append([])
 
     for k in metrics:
@@ -618,6 +644,17 @@ def load_config(env_name):
     parser.add_argument('--wandb-group', type=str, default='debug')
     parser.add_argument('--tag', type=str, default=None, help='Tag for experiment')
     parser.add_argument('--slowly', action='store_true', help='Use PyTorch training backend')
+    strategy_flags = parser.add_mutually_exclusive_group()
+    strategy_flags.add_argument('--gpt-strategy', action='store_true',
+        help='Guide native nmmo3 RL training using GPT decisions (>=500 ticks between requests)')
+    strategy_flags.add_argument('--gemini-strategy', action='store_true',
+        help='Guide native nmmo3 RL training using Gemini decisions (>=500 ticks between requests)')
+    strategy_flags.add_argument('--ollama-strategy', action='store_true',
+        help='Guide native nmmo3 RL training using local Ollama decisions (>=500 ticks between requests)')
+    parser.add_argument('--strategy-influence', type=int, default=20,
+        help='Percent of eligible actions to steer toward strategic goal (0-100)')
+    parser.add_argument('--strategy-bridge-path', type=str, default=None,
+        help='Optional location of strategic_bridge.py (auto-discovered by default)')
     parser.add_argument('--save-frames', type=int, default=0)
     parser.add_argument('--gif-path', type=str, default='eval.gif')
     parser.add_argument('--fps', type=float, default=15)
