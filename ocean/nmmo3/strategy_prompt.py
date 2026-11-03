@@ -34,7 +34,15 @@ SELECTION RULES
 - Depleted state with a safe restoration opportunity: prioritize recover.
 - Safe access to useful or scarce resources: prioritize harvest.
 - Significant equipment deficiency with a safe improvement opportunity: prioritize equip.
-- Safe beneficial resource exchange: prioritize trade.
+- Safe beneficial resource exchange: prioritize trade when current market observations
+  show a higher-tier weapon or tool upgrade, or sellable surplus that can fund upgrades.
+- Prioritize buying a SWORD or BOW at a tier higher than the agent's best owned weapon;
+  then prioritize buying a TOOL at a tier higher than the best owned tool.
+- When gold is insufficient, favor listing surplus items for sale, but note that
+  listing does NOT immediately yield gold: another agent must buy the listing.
+- Never recommend selling the only/best weapon, only/best tool or equipped gear.
+- The C execution controller, not the LLM, selects the individual market UI actions.
+- Do not choose trade without sufficient evidence of a viable purchase or sale.
 - Favorable and sufficiently safe NPC opportunity: prioritize engage_NPC.
 - No immediate threat and insufficient environmental information: prioritize explore.
 - Immediate survival always takes precedence over progression, exploration, trading, or combat.

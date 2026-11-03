@@ -184,7 +184,56 @@ int build_strategy_context(MMO* env, int pid, StrategyContext* context) {
         int history_idx = (env->strategy_history_next - env->strategy_history_count + i + STRATEGY_HISTORY_SIZE) % STRATEGY_HISTORY_SIZE;
         offset = append_text(context->text, offset, "%s\n", env->strategy_history[history_idx]);
     }
-    offset = append_text(context->text, offset, "\nMARKET\nbuys=%d\nsells=%d\n", context->market_buys, context->market_sells);
+    // Read-only trading affordances for the high-level planner.
+    // Market purchase consumes the most recently listed offer for each item.
+    int best_weapon = 0, best_tool = 0, sellable = 0, free_slots = 0;
+    int affordable_weapon = 0, affordable_tool = 0, upgrades_unaffordable = 0;
+    for (int i = 0; i < INVENTORY_SIZE; i++) {
+        int id = self->inventory[i];
+        if (!id) { free_slots++; continue; }
+        int type = ITEMS[id].type, tier = ITEMS[id].tier;
+        if ((type == I_SWORD || type == I_BOW) && tier > best_weapon) best_weapon = tier;
+        if (type == I_TOOL && tier > best_tool) best_tool = tier;
+    }
+    for (int i = 0; i < 9 && i < INVENTORY_SIZE; i++) {
+        int id = self->inventory[i];
+        if (!id || self->is_equipped[i] || env->market[id].stock >= MAX_MARKET_OFFERS) continue;
+        int type = ITEMS[id].type, tier = ITEMS[id].tier;
+        if (((type == I_SWORD || type == I_BOW) && tier >= best_weapon) ||
+            (type == I_TOOL && tier >= best_tool)) continue;
+        sellable++;
+    }
+    offset = append_text(context->text, offset,
+        "\nMARKET\nbuys=%d\nsells=%d\nbest_owned_weapon_tier=%d\n"
+        "best_owned_tool_tier=%d\ngold=%d\nfree_inventory_slots=%d\n"
+        "surplus_sellable_slots=%d\n", context->market_buys, context->market_sells,
+        best_weapon, best_tool, self->gold, free_slots, sellable);
+    for (int tier = 1; tier <= env->tiers && tier <= MAX_TIERS; tier++) {
+        int types[3] = {I_SWORD, I_BOW, I_TOOL};
+        for (int j = 0; j < 3; j++) {
+            int type = types[j];
+            if (tier <= (type == I_TOOL ? best_tool : best_weapon)) continue;
+            int id = item_index(type, tier);
+            ItemMarket* market = &env->market[id];
+            if (market->stock == 0) continue;
+            MarketOffer* offer = &market->offers[market->stock-1];
+            if (offer->seller == pid) continue;
+            int affordable = offer->price <= self->gold;
+            if (affordable) {
+                if (type == I_TOOL) affordable_tool++;
+                else affordable_weapon++;
+            } else upgrades_unaffordable++;
+            offset = append_text(context->text, offset,
+                "upgrade_offer type=%s tier=%d price=%d affordable=%d\n",
+                type == I_TOOL ? "tool" : type == I_SWORD ? "sword" : "bow",
+                tier, offer->price, affordable);
+        }
+    }
+    offset = append_text(context->text, offset,
+        "affordable_weapon_upgrades=%d\naffordable_tool_upgrades=%d\n"
+        "unaffordable_upgrade_offers=%d\n"
+        "NOTE: SELL lists an item; gold is received only if another agent BUYs it.\n",
+        affordable_weapon, affordable_tool, upgrades_unaffordable);
     if (offset < 0) return -1;
     context->text[STRATEGY_CONTEXT_MAX - 1] = '\0';
     return offset >= STRATEGY_CONTEXT_MAX ? STRATEGY_CONTEXT_MAX - 1 : offset;

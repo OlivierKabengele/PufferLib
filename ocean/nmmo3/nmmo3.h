@@ -237,6 +237,10 @@ struct Log {
     float min_comb_prof;
     float purchases;
     float sales;
+    float trade_buy_attempts;
+    float trade_sell_attempts;
+    float trade_buy_successes;
+    float trade_sell_successes;
     float equip_attack;
     float equip_defense;
     float r;
@@ -569,6 +573,16 @@ struct Entity {
     int time_alive;
     int purchases;
     int sales;
+    int trade_buy_attempts;
+    int trade_sell_attempts;
+    int strict_buy_successes;
+    int strict_sell_successes;
+    int trade_sequence;       // 0 idle, 1 buy-tier, 2 buy-item, 3 sell-select, 4 sell-price
+    int trade_start_tick;
+    int trade_target_tier;
+    int trade_target_type;
+    int trade_target_slot;
+    int trade_target_price;
 };
 
 typedef struct Item Item;
@@ -729,8 +743,10 @@ struct MMO {
     int enemy_respawn_ticks;
     int item_respawn_ticks;
     ItemMarket* market;
-    int market_buys;
-    int market_sells;
+    int market_buys;  // completed purchases in current environment episode
+    int market_sells; // completed listings in current environment episode
+    int market_buy_attempts;
+    int market_sell_attempts;
     RespawnBuffer* resource_respawn_buffer;
     RespawnBuffer* enemy_respawn_buffer;
     RespawnBuffer* drop_respawn_buffer;
@@ -776,6 +792,12 @@ void add_player_log(MMO* env, int pid) {
     log->min_comb_prof += (player->prof_lvl > player->comb_lvl) ? player->comb_lvl : player->prof_lvl;
     log->purchases += player->purchases;
     log->sales += player->sales;
+    log->trade_buy_attempts += player->trade_buy_attempts;
+    log->trade_sell_attempts += player->trade_sell_attempts;
+    // Purchases and sales change only after the market operation succeeds.
+    // Only count transactions completed on three consecutive ticks.
+    log->trade_buy_successes += player->strict_buy_successes;
+    log->trade_sell_successes += player->strict_sell_successes;
     log->equip_attack += player->equipment_attack;
     log->equip_defense += player->equipment_defense;
     log->r += player->r;
@@ -1108,6 +1130,16 @@ void spawn(MMO* env, Entity* entity) {
     entity->time_alive = 0;
     entity->purchases = 0;
     entity->sales = 0;
+    entity->trade_buy_attempts = 0;
+    entity->trade_sell_attempts = 0;
+    entity->strict_buy_successes = 0;
+    entity->strict_sell_successes = 0;
+    entity->trade_sequence = 0;
+    entity->trade_start_tick = -1;
+    entity->trade_target_tier = 0;
+    entity->trade_target_type = 0;
+    entity->trade_target_slot = -1;
+    entity->trade_target_price = 0;
 
     int idx = safe_tile(env, 5);
     int r = idx / env->width;
@@ -1694,6 +1726,8 @@ void c_reset(MMO* env) {
 
     env->market_sells = 0;
     env->market_buys = 0;
+    env->market_buy_attempts = 0;
+    env->market_sell_attempts = 0;
 
     clear_respawn_buffer(env->resource_respawn_buffer);
     clear_respawn_buffer(env->enemy_respawn_buffer);
@@ -1892,6 +1926,152 @@ void c_reset(MMO* env) {
     compute_all_obs(env);
 }
 
+
+// LLM determines WHEN to trade. This controller determines HOW to trade.
+// MARKET NOTE: SELL creates a listing; the seller receives gold only when
+// another agent later executes a BUY of that listing.
+static int trade_best_owned_tier(Entity* p, int kind) {
+    int best = 0;
+    for (int i = 0; i < INVENTORY_SIZE; i++) {
+        int id = p->inventory[i];
+        if (id <= 0) continue;
+        int type = ITEMS[id].type;
+        if ((kind == 0 && (type == I_SWORD || type == I_BOW)) ||
+            (kind == 1 && type == I_TOOL)) {
+            if (ITEMS[id].tier > best) best = ITEMS[id].tier;
+        }
+    }
+    return best;
+}
+
+// Prefer a higher-tier sword/bow over a tool upgrade. Do not buy own listings.
+// The market's actual BUY action always consumes its LAST offer.
+static int trade_choose_upgrade(MMO* env, int pid, int* tier_out, int* type_out) {
+    Entity* p = &env->players[pid];
+    if (get_free_inventory_idx(env, pid) < 0) return 0;
+    int weapon_tier = trade_best_owned_tier(p, 0);
+    int tool_tier = trade_best_owned_tier(p, 1);
+    // Scan all weapon tiers highest-first; sword wins ties over bow.
+    // Only if no weapon upgrade is affordable, consider a tool upgrade.
+    int types[3] = {I_SWORD, I_BOW, I_TOOL};
+    for (int group = 0; group < 2; group++) {
+        for (int tier = env->tiers < MAX_TIERS ? env->tiers : MAX_TIERS;
+             tier > (group == 0 ? weapon_tier : tool_tier); tier--) {
+            for (int k = (group == 0 ? 0 : 2); k < (group == 0 ? 2 : 3); k++) {
+                int type = types[k];
+                int id = item_index(type, tier);
+                ItemMarket* market = &env->market[id];
+                if (market->stock == 0) continue;
+                MarketOffer* offer = &market->offers[market->stock - 1];
+                if (offer->seller == pid || offer->price > p->gold) continue;
+                *tier_out = tier;
+                *type_out = type;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// Sell surplus items for future upgrades; never list an equipped item,
+// the only/best weapon, or the only/best tool.
+static int trade_choose_sale(MMO* env, int pid, int* slot_out, int* price_out) {
+    Entity* p = &env->players[pid];
+    int weapon_tier = trade_best_owned_tier(p, 0);
+    int tool_tier = trade_best_owned_tier(p, 1);
+    int best_slot = -1;
+    int best_score = -100000;
+    for (int i = 0; i < 9 && i < INVENTORY_SIZE; i++) {
+        int id = p->inventory[i];
+        if (id <= 0 || p->is_equipped[i] ||
+            env->market[id].stock >= MAX_MARKET_OFFERS) continue;
+        int type = ITEMS[id].type;
+        int tier = ITEMS[id].tier;
+        if ((type == I_SWORD || type == I_BOW) && tier >= weapon_tier) continue;
+        if (type == I_TOOL && tier >= tool_tier) continue;
+        // Prefer spare ores/materials over lower-tier spare equipment.
+        int score = tier + ((type != I_SWORD && type != I_BOW && type != I_TOOL) ? 100 : 0);
+        if (score > best_score) { best_score = score; best_slot = i; }
+    }
+    if (best_slot < 0) return 0;
+    int id = p->inventory[best_slot];
+    ItemMarket* market = &env->market[id];
+    int price = ITEMS[id].tier + 2;
+    if (price > 9) price = 9;
+    if (market->stock > 0) {
+        int other = market->offers[market->stock-1].price;
+        if (other > 1 && price >= other) price = other - 1;
+    }
+    if (price < 1) price = 1;
+    *slot_out = best_slot;
+    *price_out = price;
+    return 1;
+}
+
+static int trade_llm_requests_trade(MMO* env) {
+    unsigned char priority = env->strategy_features[3];
+    if (priority == 0) return 0;
+    for (int i = 0; i < 8; i++)
+        if (i != 3 && env->strategy_features[i] >= priority) return 0;
+    return 1;
+}
+
+// Return -1 to keep the RL action. Consecutive steps are generated locally.
+// The policy only starts when the LLM made TRADE the highest strategy.
+static int trade_controller_action(MMO* env, int pid) {
+    Entity* p = &env->players[pid];
+    if (p->hp <= 0) return -1;
+    if (p->trade_sequence != 0) {
+        // A pending transaction must not be interrupted by another strategy.
+        if (p->in_combat > 1) { p->trade_sequence = 0; return ATN_UI; }
+        if (p->trade_sequence == 1 && p->ui_mode == MODE_BUY_TIER)
+            return ATN_ONE + p->trade_target_tier - 1;
+        if (p->trade_sequence == 2 && p->ui_mode == MODE_BUY_ITEM) {
+            int id = item_index(p->trade_target_type, p->trade_target_tier);
+            ItemMarket* market = &env->market[id];
+            if (market->stock &&
+                market->offers[market->stock - 1].seller != pid &&
+                market->offers[market->stock - 1].price <= p->gold &&
+                get_free_inventory_idx(env, pid) >= 0)
+                return ATN_ONE + p->trade_target_type - 1;
+            p->trade_sequence = 0;
+            return ATN_UI;
+        }
+        if (p->trade_sequence == 3 && p->ui_mode == MODE_SELL_SELECT)
+            return ATN_ONE + p->trade_target_slot;
+        if (p->trade_sequence == 4 && p->ui_mode == MODE_SELL_PRICE) {
+            int slot = p->trade_target_slot;
+            int id = p->inventory[slot];
+            if (id > 0 && !p->is_equipped[slot] &&
+                env->market[id].stock < MAX_MARKET_OFFERS)
+                return ATN_ONE + p->trade_target_price - 1;
+            p->trade_sequence = 0;
+            return ATN_UI;
+        }
+        p->trade_sequence = 0;
+        return ATN_UI;
+    }
+
+    // Don't hijack an RL-initiated UI sequence.
+    if (p->ui_mode != MODE_PLAY || p->in_combat > 1 ||
+        !trade_llm_requests_trade(env)) return -1;
+
+    int tier = 0, type = 0, slot = -1, price = 0;
+    // Purchase a higher-tier weapon first, then a higher-tier tool.
+    if (trade_choose_upgrade(env, pid, &tier, &type)) {
+        p->trade_target_tier = tier;
+        p->trade_target_type = type;
+        return ATN_BUY;
+    }
+    // When no affordable upgrade exists, list spare items to raise funds.
+    if (trade_choose_sale(env, pid, &slot, &price)) {
+        p->trade_target_slot = slot;
+        p->trade_target_price = price;
+        return ATN_SELL;
+    }
+    return -1;
+}
+
 void c_step(MMO* env) {
     env->tick += 1;
     int tick = env->tick;
@@ -2057,6 +2237,17 @@ void c_step(MMO* env) {
 
         // Update entity heading
         int action = env->actions[pid];
+        const char* trade_executor = getenv("NMMO3_TRADE_EXECUTOR");
+        const char* trade_strategy = getenv("NMMO3_USE_STRATEGY");
+        if (trade_executor && strcmp(trade_executor, "1") == 0 &&
+            trade_strategy && (strcmp(trade_strategy, "1") == 0 ||
+                               strcmp(trade_strategy, "true") == 0)) {
+            int override = trade_controller_action(env, pid);
+            if (override >= 0) {
+                action = override;
+                env->actions[pid] = (float)override;
+            }
+        }
         if (is_move(action)) {
             entity->dir = action - ATN_DOWN;
         } else if (is_run(action)) {
@@ -2066,6 +2257,7 @@ void c_step(MMO* env) {
         // Market mode
         int ui_mode = entity->ui_mode;
         if (is_buy(ui_mode)) {
+            if (!is_num(action)) entity->trade_sequence = 0;
             if (action != ATN_NOOP) {
                 entity->ui_mode = MODE_PLAY;
             }
@@ -2080,6 +2272,10 @@ void c_step(MMO* env) {
                 if (action_idx >= env->tiers) {
                     continue;
                 }
+                if (entity->trade_sequence == 1 &&
+                    tick == entity->trade_start_tick + 1)
+                    entity->trade_sequence = 2;
+                else entity->trade_sequence = 0;
                 entity->market_tier = action_idx + 1;
                 entity->ui_mode = MODE_BUY_ITEM;
                 continue;
@@ -2130,7 +2326,12 @@ void c_step(MMO* env) {
             
             entity->inventory[inventory_idx] = item_id;
             entity->purchases += 1;
+            if (entity->trade_sequence == 2 &&
+                tick == entity->trade_start_tick + 2)
+                entity->strict_buy_successes += 1;
+            entity->trade_sequence = 0;
         } else if (is_sell(ui_mode)) {
+            if (!is_num(action)) entity->trade_sequence = 0;
             if (action != ATN_NOOP) {
                 entity->ui_mode = MODE_PLAY;
             }
@@ -2146,6 +2347,10 @@ void c_step(MMO* env) {
                 if (item_type == 0) {
                     continue;
                 }
+                if (entity->trade_sequence == 3 &&
+                    tick == entity->trade_start_tick + 1)
+                    entity->trade_sequence = 4;
+                else entity->trade_sequence = 0;
                 entity->sell_idx = action_idx;
                 entity->ui_mode = MODE_SELL_PRICE;
                 continue;
@@ -2178,6 +2383,10 @@ void c_step(MMO* env) {
             entity->inventory[inventory_idx] = 0;
             entity->sales += 1;
             env->market_sells += 1;
+            if (entity->trade_sequence == 4 &&
+                tick == entity->trade_start_tick + 2)
+                entity->strict_sell_successes += 1;
+            entity->trade_sequence = 0;
             reward->market_sell = env->reward_market;
             Reward* ret = &env->returns[pid];
             ret->market_sell += env->reward_market;
@@ -2193,8 +2402,18 @@ void c_step(MMO* env) {
         } else if (is_num(action)) {
             use_item(env, pid, action - ATN_ONE);
         } else if (action == ATN_BUY) {
+            // Beginning of BUY -> TIER -> ITEM transaction.
+            entity->trade_buy_attempts += 1;
+            env->market_buy_attempts += 1;
+            entity->trade_start_tick = tick;
+            entity->trade_sequence = 1;
             entity->ui_mode = MODE_BUY_TIER;
         } else if (action == ATN_SELL) {
+            // Beginning of SELL -> SELECT -> PRICE transaction.
+            entity->trade_sell_attempts += 1;
+            env->market_sell_attempts += 1;
+            entity->trade_start_tick = tick;
+            entity->trade_sequence = 3;
             entity->ui_mode = MODE_SELL_SELECT;
         }
     }
