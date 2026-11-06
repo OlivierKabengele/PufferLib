@@ -4,6 +4,14 @@
 #define NUM_ATNS 1
 #define ACT_SIZES {26}
 #define OBS_TENSOR_T ByteTensor
+// These are event totals per logging interval, not episode averages.
+#define MY_LOG_SUM_FIELDS(X) \
+    X(trade_buy_attempts) \
+    X(trade_buy_successes) \
+    X(trade_buy_failures) \
+    X(trade_sell_attempts) \
+    X(trade_sell_successes) \
+    X(trade_sell_failures)
 #define MY_LOG_LLM_TOKENS
 
 #define Env MMO
@@ -49,8 +57,10 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "sales", log->sales);
     dict_set(out, "trade_buy_attempts", log->trade_buy_attempts);
     dict_set(out, "trade_buy_successes", log->trade_buy_successes);
+    dict_set(out, "trade_buy_failures", log->trade_buy_failures);
     dict_set(out, "trade_sell_attempts", log->trade_sell_attempts);
     dict_set(out, "trade_sell_successes", log->trade_sell_successes);
+    dict_set(out, "trade_sell_failures", log->trade_sell_failures);
     dict_set(out, "equip_attack", log->equip_attack);
     dict_set(out, "equip_defense", log->equip_defense);
     dict_set(out, "r", log->r);

@@ -239,8 +239,10 @@ struct Log {
     float sales;
     float trade_buy_attempts;
     float trade_buy_successes;
+    float trade_buy_failures;
     float trade_sell_attempts;
     float trade_sell_successes;
+    float trade_sell_failures;
     float equip_attack;
     float equip_defense;
     float r;
@@ -573,10 +575,8 @@ struct Entity {
     int time_alive;
     int purchases;
     int sales;
-    int trade_buy_attempts;
-    int trade_buy_successes;
-    int trade_sell_attempts;
-    int trade_sell_successes;
+    int trade_buy_pending;
+    int trade_sell_pending;
 };
 
 typedef struct Item Item;
@@ -784,10 +784,6 @@ void add_player_log(MMO* env, int pid) {
     log->min_comb_prof += (player->prof_lvl > player->comb_lvl) ? player->comb_lvl : player->prof_lvl;
     log->purchases += player->purchases;
     log->sales += player->sales;
-    log->trade_buy_attempts += player->trade_buy_attempts;
-    log->trade_buy_successes += player->trade_buy_successes;
-    log->trade_sell_attempts += player->trade_sell_attempts;
-    log->trade_sell_successes += player->trade_sell_successes;
     log->equip_attack += player->equipment_attack;
     log->equip_defense += player->equipment_defense;
     log->r += player->r;
@@ -1116,14 +1112,18 @@ int safe_tile(MMO* env, int delta) {
 // Can spawn on top of another player, but this will not corrupt the state.
 // They will just move off of each other.
 void spawn(MMO* env, Entity* entity) {
+    if (entity->trade_buy_pending) {
+        env->log.trade_buy_failures += 1;
+    }
+    if (entity->trade_sell_pending) {
+        env->log.trade_sell_failures += 1;
+    }
+    entity->trade_buy_pending = 0;
+    entity->trade_sell_pending = 0;
     entity->hp = 99;
     entity->time_alive = 0;
     entity->purchases = 0;
     entity->sales = 0;
-    entity->trade_buy_attempts = 0;
-    entity->trade_buy_successes = 0;
-    entity->trade_sell_attempts = 0;
-    entity->trade_sell_successes = 0;
 
     int idx = safe_tile(env, 5);
     int r = idx / env->width;
@@ -2086,14 +2086,26 @@ void c_step(MMO* env) {
                 entity->ui_mode = MODE_PLAY;
             }
             if (!is_num(action)) {
+                if (action != ATN_NOOP && entity->trade_buy_pending) {
+                    env->log.trade_buy_failures += 1;
+                    entity->trade_buy_pending = 0;
+                }
                 continue;
             }
             if (entity->in_combat > 0) {
+                if (entity->trade_buy_pending) {
+                    env->log.trade_buy_failures += 1;
+                    entity->trade_buy_pending = 0;
+                }
                 continue;
             }
             int action_idx = action - ATN_ONE;
             if (ui_mode == MODE_BUY_TIER) {
                 if (action_idx >= env->tiers) {
+                    if (entity->trade_buy_pending) {
+                        env->log.trade_buy_failures += 1;
+                        entity->trade_buy_pending = 0;
+                    }
                     continue;
                 }
                 entity->market_tier = action_idx + 1;
@@ -2101,6 +2113,10 @@ void c_step(MMO* env) {
                 continue;
             }
             if (action_idx >= 11) {
+                if (entity->trade_buy_pending) {
+                    env->log.trade_buy_failures += 1;
+                    entity->trade_buy_pending = 0;
+                }
                 continue;
             }
             int market_tier = entity->market_tier;
@@ -2109,6 +2125,10 @@ void c_step(MMO* env) {
 
             int stock = market->stock;
             if (stock == 0) {
+                if (entity->trade_buy_pending) {
+                    env->log.trade_buy_failures += 1;
+                    entity->trade_buy_pending = 0;
+                }
                 continue;
             }
 
@@ -2117,11 +2137,19 @@ void c_step(MMO* env) {
             int price = offer->price;
             Entity* buyer = get_entity(env, pid);
             if (buyer->gold < price) {
+                if (entity->trade_buy_pending) {
+                    env->log.trade_buy_failures += 1;
+                    entity->trade_buy_pending = 0;
+                }
                 continue;
             }
 
             int inventory_idx = get_free_inventory_idx(env, pid);
             if (inventory_idx == -1) {
+                if (entity->trade_buy_pending) {
+                    env->log.trade_buy_failures += 1;
+                    entity->trade_buy_pending = 0;
+                }
                 continue;
             }
          
@@ -2146,31 +2174,55 @@ void c_step(MMO* env) {
             
             entity->inventory[inventory_idx] = item_id;
             entity->purchases += 1;
-            entity->trade_buy_successes += 1;
+            env->log.trade_buy_successes += 1;
+            entity->trade_buy_pending = 0;
         } else if (is_sell(ui_mode)) {
             if (action != ATN_NOOP) {
                 entity->ui_mode = MODE_PLAY;
             }
             if (!is_num(action)) {
+                if (action != ATN_NOOP && entity->trade_sell_pending) {
+                    env->log.trade_sell_failures += 1;
+                    entity->trade_sell_pending = 0;
+                }
                 continue;
             }
             if (entity->in_combat > 0) {
+                if (entity->trade_sell_pending) {
+                    env->log.trade_sell_failures += 1;
+                    entity->trade_sell_pending = 0;
+                }
                 continue;
             }
             int action_idx = action - ATN_ONE;
             if (ui_mode == MODE_SELL_SELECT) {
                 int item_type = entity->inventory[action_idx];
                 if (item_type == 0) {
+                    if (entity->trade_sell_pending) {
+                        env->log.trade_sell_failures += 1;
+                        entity->trade_sell_pending = 0;
+                    }
                     continue;
                 }
                 entity->sell_idx = action_idx;
                 entity->ui_mode = MODE_SELL_PRICE;
                 continue;
             }
+            if (action_idx >= 11) {
+                if (entity->trade_sell_pending) {
+                    env->log.trade_sell_failures += 1;
+                    entity->trade_sell_pending = 0;
+                }
+                continue;
+            }
             int price = action_idx + 1; //sell_price(action_idx);
             int inventory_idx = entity->sell_idx;
             int item_type = entity->inventory[inventory_idx];
             if (item_type == 0) {
+                if (entity->trade_sell_pending) {
+                    env->log.trade_sell_failures += 1;
+                    entity->trade_sell_pending = 0;
+                }
                 continue;
             }
             if (entity->is_equipped[inventory_idx]) {
@@ -2182,6 +2234,10 @@ void c_step(MMO* env) {
 
             // TODO: Will have to update once prices become dynamic
             if (stock == MAX_MARKET_OFFERS) {
+                if (entity->trade_sell_pending) {
+                    env->log.trade_sell_failures += 1;
+                    entity->trade_sell_pending = 0;
+                }
                 continue;
             }
 
@@ -2194,7 +2250,8 @@ void c_step(MMO* env) {
 
             entity->inventory[inventory_idx] = 0;
             entity->sales += 1;
-            entity->trade_sell_successes += 1;
+            env->log.trade_sell_successes += 1;
+            entity->trade_sell_pending = 0;
             env->market_sells += 1;
             reward->market_sell = env->reward_market;
             Reward* ret = &env->returns[pid];
@@ -2211,10 +2268,12 @@ void c_step(MMO* env) {
         } else if (is_num(action)) {
             use_item(env, pid, action - ATN_ONE);
         } else if (action == ATN_BUY) {
-            entity->trade_buy_attempts += 1;
+            env->log.trade_buy_attempts += 1;
+            entity->trade_buy_pending = 1;
             entity->ui_mode = MODE_BUY_TIER;
         } else if (action == ATN_SELL) {
-            entity->trade_sell_attempts += 1;
+            env->log.trade_sell_attempts += 1;
+            entity->trade_sell_pending = 1;
             entity->ui_mode = MODE_SELL_SELECT;
         }
     }
@@ -2224,7 +2283,7 @@ void c_step(MMO* env) {
         comb_lvl += env->players[pid].comb_lvl;
         prof_lvl += env->players[pid].prof_lvl;
     }
-    // vecenv averages Log fields by episode count before displaying them.
+    // Most Log fields are averaged by episode count; trade event fields are summed.
     if (env->num_agents > 0) {
         env->log.comb_lvl = comb_lvl / env->num_agents * env->log.n;
         env->log.prof_lvl = prof_lvl / env->num_agents * env->log.n;

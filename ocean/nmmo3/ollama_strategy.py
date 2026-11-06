@@ -130,6 +130,7 @@ def main():
         ValueError,
         json.JSONDecodeError,
     ) as error:
+        print(f"Ollama request failed: {error}", file=sys.stderr)
         raise SystemExit(1)
     print(json.dumps(result))
 
